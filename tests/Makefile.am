@@ -5,14 +5,19 @@
 #             packet encryption, packet authentication, and
 #             packet compression.
 #
-#  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+#  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
 #  Copyright (C) 2006-2012 Alon Bar-Lev <alon.barlev@gmail.com>
 #
 
 MAINTAINERCLEANFILES = \
 	$(srcdir)/Makefile.in
 
-test_scripts = t_client.sh t_lpback.sh t_cltsrv.sh
+SUBDIRS = unit_tests
+
+test_scripts = t_client.sh
+if ENABLE_CRYPTO
+test_scripts += t_lpback.sh t_cltsrv.sh
+endif
 
 TESTS_ENVIRONMENT = top_srcdir="$(top_srcdir)"
 TESTS = $(test_scripts)
@@ -20,4 +25,3 @@ TESTS = $(test_scripts)
 dist_noinst_SCRIPTS = \
 	$(test_scripts) \
 	t_cltsrv-down.sh
-

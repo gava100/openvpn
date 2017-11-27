@@ -5,8 +5,8 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
- *  Copyright (C) 2010 Fox Crypto B.V. <openvpn@fox-it.com>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2010-2017 Fox Crypto B.V. <openvpn@fox-it.com>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -174,6 +174,15 @@ void tls_ctx_set_options (struct tls_root_ctx *ctx, unsigned int ssl_flags);
  * @param ciphers	String containing : delimited cipher names.
  */
 void tls_ctx_restrict_ciphers(struct tls_root_ctx *ctx, const char *ciphers);
+
+/**
+ * Check our certificate notBefore and notAfter fields, and warn if the cert is
+ * either not yet valid or has expired.  Note that this is a non-fatal error,
+ * since we compare against the system time, which might be incorrect.
+ *
+ * @param ctx		TLS context to get our certificate from.
+ */
+void tls_ctx_check_cert_time (const struct tls_root_ctx *ctx);
 
 /**
  * Load Diffie Hellman Parameters, and load them into the library-specific

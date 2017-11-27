@@ -5,8 +5,8 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
- *  Copyright (C) 2010 Fox Crypto B.V. <openvpn@fox-it.com>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2010-2017 Fox Crypto B.V. <openvpn@fox-it.com>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -98,39 +98,38 @@ openvpn_encrypt (struct buffer *buf, struct buffer work,
       /* Do Encrypt from buf -> work */
       if (ctx->cipher)
 	{
-	  uint8_t iv_buf[OPENVPN_MAX_IV_LENGTH];
+	  uint8_t iv_buf[OPENVPN_MAX_IV_LENGTH] = {0};
 	  const int iv_size = cipher_ctx_iv_length (ctx->cipher);
 	  const cipher_kt_t *cipher_kt = cipher_ctx_get_cipher_kt (ctx->cipher);
 	  int outlen;
 
 	  if (cipher_kt_mode_cbc(cipher_kt))
 	    {
-	      CLEAR (iv_buf);
-
 	      /* generate pseudo-random IV */
 	      if (opt->flags & CO_USE_IV)
 		prng_bytes (iv_buf, iv_size);
 
 	      /* Put packet ID in plaintext buffer or IV, depending on cipher mode */
-	      if (opt->packet_id)
+	      if (opt->packet_id
+		  && !packet_id_write (&opt->packet_id->send, buf, BOOL_CAST (opt->flags & CO_PACKET_ID_LONG_FORM), true))
 		{
-		  struct packet_id_net pin;
-		  packet_id_alloc_outgoing (&opt->packet_id->send, &pin, BOOL_CAST (opt->flags & CO_PACKET_ID_LONG_FORM));
-		  ASSERT (packet_id_write (&pin, buf, BOOL_CAST (opt->flags & CO_PACKET_ID_LONG_FORM), true));
+		  msg (D_CRYPT_ERRORS, "ENCRYPT ERROR: packet ID roll over");
+		  goto err;
 		}
 	    }
 	  else if (cipher_kt_mode_ofb_cfb(cipher_kt))
 	    {
-	      struct packet_id_net pin;
 	      struct buffer b;
 
 	      ASSERT (opt->flags & CO_USE_IV);    /* IV and packet-ID required */
 	      ASSERT (opt->packet_id); /*  for this mode. */
 
-	      packet_id_alloc_outgoing (&opt->packet_id->send, &pin, true);
-	      memset (iv_buf, 0, iv_size);
 	      buf_set_write (&b, iv_buf, iv_size);
-	      ASSERT (packet_id_write (&pin, &b, true, false));
+	      if (!packet_id_write (&opt->packet_id->send, &b, true, false))
+		{
+		  msg (D_CRYPT_ERRORS, "ENCRYPT ERROR: packet ID roll over");
+		  goto err;
+		}
 	    }
 	  else /* We only support CBC, CFB, or OFB modes right now */
 	    {
@@ -189,11 +188,11 @@ openvpn_encrypt (struct buffer *buf, struct buffer work,
 	}
       else				/* No Encryption */
 	{
-	  if (opt->packet_id)
+	  if (opt->packet_id
+	      && !packet_id_write (&opt->packet_id->send, buf, BOOL_CAST (opt->flags & CO_PACKET_ID_LONG_FORM), true))
 	    {
-	      struct packet_id_net pin;
-	      packet_id_alloc_outgoing (&opt->packet_id->send, &pin, BOOL_CAST (opt->flags & CO_PACKET_ID_LONG_FORM));
-	      ASSERT (packet_id_write (&pin, buf, BOOL_CAST (opt->flags & CO_PACKET_ID_LONG_FORM), true));
+	      msg (D_CRYPT_ERRORS, "ENCRYPT ERROR: packet ID roll over");
+	      goto err;
 	    }
 	  work = *buf;
 	}
@@ -277,14 +276,13 @@ openvpn_decrypt (struct buffer *buf, struct buffer work,
 	{
 	  const int iv_size = cipher_ctx_iv_length (ctx->cipher);
 	  const cipher_kt_t *cipher_kt = cipher_ctx_get_cipher_kt (ctx->cipher);
-	  uint8_t iv_buf[OPENVPN_MAX_IV_LENGTH];
+	  uint8_t iv_buf[OPENVPN_MAX_IV_LENGTH] = { 0 };
 	  int outlen;
 
 	  /* initialize work buffer with FRAME_HEADROOM bytes of prepend capacity */
 	  ASSERT (buf_init (&work, FRAME_HEADROOM_ADJ (frame, FRAME_HEADROOM_MARKER_DECRYPT)));
 
 	  /* use IV if user requested it */
-	  CLEAR (iv_buf);
 	  if (opt->flags & CO_USE_IV)
 	    {
 	      if (buf->len < iv_size)
@@ -455,7 +453,12 @@ init_key_type (struct key_type *kt, const char *ciphername,
   else
     {
       if (warn)
-	msg (M_WARN, "******* WARNING *******: null cipher specified, no encryption will be used");
+        {
+            msg(M_WARN, "******* WARNING *******: '--cipher none' was specified. "
+                "This means NO encryption will be performed and tunnelled "
+                "data WILL be transmitted in clear text over the network! "
+                "PLEASE DO RECONSIDER THIS SETTING!");
+        }
     }
   if (authname && authname_defined)
     {
@@ -465,7 +468,13 @@ init_key_type (struct key_type *kt, const char *ciphername,
   else
     {
       if (warn)
-	msg (M_WARN, "******* WARNING *******: null MAC specified, no authentication will be used");
+        {
+            msg(M_WARN, "******* WARNING *******: '--auth none' was specified. "
+                "This means no authentication will be performed on received "
+                "packets, meaning you CANNOT trust that the data received by "
+                "the remote side have NOT been manipulated. "
+                "PLEASE DO RECONSIDER THIS SETTING!");
+        }
     }
 }
 
@@ -492,9 +501,15 @@ init_key_ctx (struct key_ctx *ctx, struct key *key,
       dmsg (D_SHOW_KEYS, "%s: CIPHER KEY: %s", prefix,
           format_hex (key->cipher, kt->cipher_length, 0, &gc));
       dmsg (D_CRYPTO_DEBUG, "%s: CIPHER block_size=%d iv_size=%d",
-          prefix,
-          cipher_kt_block_size(kt->cipher),
-          cipher_kt_iv_size(kt->cipher));
+          prefix, cipher_kt_block_size(kt->cipher),
+	  cipher_kt_iv_size(kt->cipher));
+      if (cipher_kt_block_size(kt->cipher) < 128/8)
+	{
+	  msg (M_WARN, "WARNING: INSECURE cipher with block size less than 128"
+	      " bit (%d bit).  This allows attacks like SWEET32.  Mitigate by "
+	      "using a --cipher with a larger block size (e.g. AES-256-CBC).",
+	      cipher_kt_block_size(kt->cipher)*8);
+	}
     }
   if (kt->digest && kt->hmac_length > 0)
     {
@@ -817,7 +832,7 @@ get_tls_handshake_key (const struct key_type *key_type,
       init_key_ctx (&ctx->decrypt, &key2.keys[kds.in_key], &kt, OPENVPN_OP_DECRYPT,
 		    "Incoming Control Channel Authentication");
 
-      CLEAR (key2);
+      secure_memzero (&key2, sizeof (key2));
     }
   else
     {
@@ -890,7 +905,7 @@ read_key_file (struct key2 *key2, const char *file, const unsigned int flags)
       in = alloc_buf_gc (2048, &gc);
       fd = platform_open (file, O_RDONLY, 0);
       if (fd == -1)
-	msg (M_ERR, "Cannot open file key file '%s'", file);
+	msg (M_ERR, "Cannot open key file '%s'", file);
       size = read (fd, in.data, in.capacity);
       if (size < 0)
 	msg (M_FATAL, "Read error on key file ('%s')", file);
@@ -1127,8 +1142,8 @@ write_key_file (const int nkeys, const char *filename)
       buf_printf (&out, "%s\n", fmt);
 
       /* zero memory which held key component (will be freed by GC) */
-      memset (fmt, 0, strlen(fmt));
-      CLEAR (key);
+      secure_memzero (fmt, strlen (fmt));
+      secure_memzero (&key, sizeof (key));
     }
 
   buf_printf (&out, "%s\n", static_key_foot);
@@ -1279,13 +1294,14 @@ read_key (struct key *key, const struct key_type *kt, struct buffer *buf)
   if (!buf_read (buf, &hmac_length, 1))
     goto read_err;
 
+  if (cipher_length != kt->cipher_length || hmac_length != kt->hmac_length)
+    goto key_len_err;
+
   if (!buf_read (buf, key->cipher, cipher_length))
     goto read_err;
   if (!buf_read (buf, key->hmac, hmac_length))
     goto read_err;
 
-  if (cipher_length != kt->cipher_length || hmac_length != kt->hmac_length)
-    goto key_len_err;
 
   return 1;
 
@@ -1383,7 +1399,7 @@ prng_bytes (uint8_t *output, int len)
 	}
     }
   else
-    rand_bytes (output, len);
+    ASSERT (rand_bytes (output, len));
 }
 
 /* an analogue to the random() function, but use prng_bytes */

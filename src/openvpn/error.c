@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -43,13 +43,6 @@
 #include "ps.h"
 #include "mstats.h"
 
-#ifdef ENABLE_CRYPTO
-#ifdef ENABLE_CRYPTO_OPENSSL
-#include <openssl/err.h>
-#endif
-#endif
-
-#include "memdbg.h"
 
 #if SYSLOG_CAPABILITY
 #ifndef LOG_OPENVPN
@@ -224,7 +217,7 @@ void x_msg_va (const unsigned int flags, const char *format, va_list arglist)
 
 #ifndef HAVE_VARARG_MACROS
   /* the macro has checked this otherwise */
-  if (!MSG_TEST (flags))
+  if (!msg_test (flags))
     return;
 #endif
 
@@ -253,28 +246,6 @@ void x_msg_va (const unsigned int flags, const char *format, va_list arglist)
 			m1, strerror_ts (e, &gc), e);
       SWAP;
     }
-
-#ifdef ENABLE_CRYPTO
-#ifdef ENABLE_CRYPTO_OPENSSL
-  if (flags & M_SSL)
-    {
-      int nerrs = 0;
-      int err;
-      while ((err = ERR_get_error ()))
-	{
-	  openvpn_snprintf (m2, ERR_BUF_SIZE, "%s: %s",
-			    m1, ERR_error_string (err, NULL));
-	  SWAP;
-	  ++nerrs;
-	}
-      if (!nerrs)
-	{
-	  openvpn_snprintf (m2, ERR_BUF_SIZE, "%s (OpenSSL)", m1);
-	  SWAP;
-	}
-    }
-#endif
-#endif
 
   if (flags & M_OPTERR)
     {
@@ -397,9 +368,13 @@ dont_mute (unsigned int flags)
 }
 
 void
-assert_failed (const char *filename, int line)
+assert_failed (const char *filename, int line, const char *condition)
 {
-  msg (M_FATAL, "Assertion failed at %s:%d", filename, line);
+  if (condition)
+    msg (M_FATAL, "Assertion failed at %s:%d (%s)", filename, line, condition);
+  else
+    msg (M_FATAL, "Assertion failed at %s:%d", filename, line);
+  _exit(1);
 }
 
 /*

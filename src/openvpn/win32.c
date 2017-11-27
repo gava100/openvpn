@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -45,6 +45,35 @@
 #include "misc.h"
 
 #include "memdbg.h"
+
+#include "win32_wfp.h"
+
+#ifdef HAVE_VERSIONHELPERS_H
+#include <versionhelpers.h>
+#else
+#include "compat-versionhelpers.h"
+#endif
+
+/* WFP function pointers. Initialized in win_wfp_init_funcs() */
+func_ConvertInterfaceIndexToLuid ConvertInterfaceIndexToLuid = NULL;
+func_FwpmEngineOpen0 FwpmEngineOpen0 = NULL;
+func_FwpmEngineClose0 FwpmEngineClose0 = NULL;
+func_FwpmFilterAdd0 FwpmFilterAdd0 = NULL;
+func_FwpmSubLayerAdd0 FwpmSubLayerAdd0 = NULL;
+func_FwpmSubLayerDeleteByKey0 FwpmSubLayerDeleteByKey0 = NULL;
+func_FwpmFreeMemory0 FwpmFreeMemory0 = NULL;
+func_FwpmGetAppIdFromFileName0 FwpmGetAppIdFromFileName0 = NULL;
+func_FwpmSubLayerGetByKey0 FwpmSubLayerGetByKey0 = NULL;
+
+/*
+ * WFP firewall name.
+ */
+WCHAR * FIREWALL_NAME = L"OpenVPN"; /* GLOBAL */
+
+/*
+ * WFP handle and GUID.
+ */
+static HANDLE m_hEngineHandle = NULL; /* GLOBAL */
 
 /*
  * Windows internal socket API state (opaque).
@@ -91,7 +120,6 @@ init_win32 (void)
     }
   window_title_clear (&window_title);
   win32_signal_clear (&win32_signal);
-  netcmd_semaphore_init ();
 }
 
 void
@@ -324,6 +352,53 @@ net_event_win32_close (struct net_event_win32 *ne)
  * (2) Service mode -- map Windows event object to SIGTERM
  */
 
+static void
+win_trigger_event(struct win32_signal *ws)
+{
+  if (ws->mode == WSO_MODE_SERVICE && HANDLE_DEFINED(ws->in.read))
+    SetEvent (ws->in.read);
+  else /* generate a key-press event */
+    {
+      DWORD tmp;
+      INPUT_RECORD ir;
+      HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
+
+      CLEAR(ir);
+      ir.EventType = KEY_EVENT;
+      ir.Event.KeyEvent.bKeyDown = true;
+      if (!stdin_handle || !WriteConsoleInput(stdin_handle, &ir, 1, &tmp))
+        msg(M_WARN|M_ERRNO, "WARN: win_trigger_event: WriteConsoleInput");
+    }
+}
+
+/*
+ * Callback to handle console ctrl events
+ */
+static bool WINAPI
+win_ctrl_handler (DWORD signum)
+{
+  msg(D_LOW, "win_ctrl_handler: signal received (code=%lu)", (unsigned long) signum);
+
+  if (siginfo_static.signal_received == SIGTERM)
+     return true;
+
+  switch (signum)
+    {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+      throw_signal(SIGTERM);
+      /* trigget the win32_signal to interrupt the event loop */
+      win_trigger_event(&win32_signal);
+      return true;
+      break;
+    default:
+      msg(D_LOW, "win_ctrl_handler: signal (code=%lu) not handled", (unsigned long) signum);
+      break;
+    }
+  /* pass all other signals to the next handler */
+  return false;
+}
+
 void
 win32_signal_clear (struct win32_signal *ws)
 {
@@ -403,6 +478,9 @@ win32_signal_open (struct win32_signal *ws,
 	    ws->mode = WSO_MODE_SERVICE;
 	}
     }
+    /* set the ctrl handler in both console and service modes */
+    if (!SetConsoleCtrlHandler ((PHANDLER_ROUTINE) win_ctrl_handler, true))
+       msg (M_WARN|M_ERRNO, "WARN: SetConsoleCtrlHandler failed");
 }
 
 static bool
@@ -512,6 +590,9 @@ win32_signal_get (struct win32_signal *ws)
 	    case 0x3E: /* F4 -> TERM */
 	      ret = SIGTERM;
 	      break;
+           case 0x03: /* CTRL-C -> TERM */
+             ret = SIGTERM;
+             break;
 	    }
 	}
       if (ret)
@@ -684,6 +765,10 @@ void
 netcmd_semaphore_lock (void)
 {
   const int timeout_seconds = 600;
+
+  if (!netcmd_semaphore.hand)
+    netcmd_semaphore_init ();
+
   if (!semaphore_lock (&netcmd_semaphore, timeout_seconds * 1000))
     msg (M_FATAL, "Cannot lock net command semaphore"); 
 }
@@ -692,6 +777,8 @@ void
 netcmd_semaphore_release (void)
 {
   semaphore_release (&netcmd_semaphore);
+  /* netcmd_semaphore has max count of 1 - safe to close after release */
+  semaphore_close (&netcmd_semaphore);
 }
 
 /*
@@ -763,7 +850,12 @@ win_safe_filename (const char *fn)
 static char *
 env_block (const struct env_set *es)
 {
-  char * force_path = "PATH=C:\\Windows\\System32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem";
+  char force_path[256];
+  char *sysroot = get_win_sys_path();
+
+  if (!openvpn_snprintf(force_path, sizeof(force_path), "PATH=%s\\System32;%s;%s\\System32\\Wbem",
+                        sysroot, sysroot, sysroot))
+    msg(M_WARN, "env_block: default path truncated to %s", force_path);
 
   if (es)
     {
@@ -1019,4 +1111,354 @@ win_get_tempdir()
   WideCharToMultiByte (CP_UTF8, 0, wtmpdir, -1, tmpdir, sizeof (tmpdir), NULL, NULL);
   return tmpdir;
 }
+
+bool
+win_wfp_init_funcs ()
+{
+  /* Initialize all WFP-related function pointers */
+  HMODULE iphlpapiHandle;
+  HMODULE fwpuclntHandle;
+
+  iphlpapiHandle = LoadLibrary("iphlpapi.dll");
+  if (iphlpapiHandle == NULL)
+  {
+    msg (M_NONFATAL, "Can't load iphlpapi.dll");
+    return false;
+  }
+
+  fwpuclntHandle = LoadLibrary("fwpuclnt.dll");
+  if (fwpuclntHandle == NULL)
+  {
+    msg (M_NONFATAL, "Can't load fwpuclnt.dll");
+    return false;
+  }
+
+  ConvertInterfaceIndexToLuid = (func_ConvertInterfaceIndexToLuid)GetProcAddress(iphlpapiHandle, "ConvertInterfaceIndexToLuid");
+  FwpmFilterAdd0 = (func_FwpmFilterAdd0)GetProcAddress(fwpuclntHandle, "FwpmFilterAdd0");
+  FwpmEngineOpen0 = (func_FwpmEngineOpen0)GetProcAddress(fwpuclntHandle, "FwpmEngineOpen0");
+  FwpmEngineClose0 = (func_FwpmEngineClose0)GetProcAddress(fwpuclntHandle, "FwpmEngineClose0");
+  FwpmSubLayerAdd0 = (func_FwpmSubLayerAdd0)GetProcAddress(fwpuclntHandle, "FwpmSubLayerAdd0");
+  FwpmSubLayerDeleteByKey0 = (func_FwpmSubLayerDeleteByKey0)GetProcAddress(fwpuclntHandle, "FwpmSubLayerDeleteByKey0");
+  FwpmFreeMemory0 = (func_FwpmFreeMemory0)GetProcAddress(fwpuclntHandle, "FwpmFreeMemory0");
+  FwpmGetAppIdFromFileName0 = (func_FwpmGetAppIdFromFileName0)GetProcAddress(fwpuclntHandle, "FwpmGetAppIdFromFileName0");
+  FwpmSubLayerGetByKey0 = (func_FwpmSubLayerGetByKey0) GetProcAddress(fwpuclntHandle, "FwpmSubLayerGetByKey0");
+
+  if (!ConvertInterfaceIndexToLuid ||
+      !FwpmFilterAdd0 ||
+      !FwpmEngineOpen0 ||
+      !FwpmEngineClose0 ||
+      !FwpmSubLayerAdd0 ||
+      !FwpmSubLayerDeleteByKey0 ||
+      !FwpmFreeMemory0 ||
+      !FwpmSubLayerGetByKey0 ||
+      !FwpmGetAppIdFromFileName0)
+  {
+    msg (M_NONFATAL, "Can't get address for all WFP-related procedures.");
+    return false;
+  }
+
+  return true;
+}
+
+/* UUID of WFP sublayer used by all instances of openvpn
+   2f660d7e-6a37-11e6-a181-001e8c6e04a2 */
+DEFINE_GUID(
+   OPENVPN_BLOCK_OUTSIDE_DNS_SUBLAYER,
+   0x2f660d7e,
+   0x6a37,
+   0x11e6,
+   0xa1, 0x81, 0x00, 0x1e, 0x8c, 0x6e, 0x04, 0xa2
+);
+
+/*
+ * Add a persistent sublayer with specified uuid
+ */
+static DWORD
+add_sublayer (GUID uuid)
+{
+  FWPM_SESSION0 session;
+  HANDLE engine = NULL;
+  DWORD err = 0;
+  FWPM_SUBLAYER0 sublayer;
+
+  CLEAR (session);
+  CLEAR (sublayer);
+
+  err = FwpmEngineOpen0 (NULL, RPC_C_AUTHN_WINNT, NULL, &session, &engine);
+  if (err != ERROR_SUCCESS)
+    goto out;
+
+  sublayer.subLayerKey = uuid;
+  sublayer.displayData.name = FIREWALL_NAME;
+  sublayer.displayData.description = FIREWALL_NAME;
+  sublayer.flags = 0;
+  sublayer.weight = 0x100;
+
+  /* Add sublayer to the session */
+  err = FwpmSubLayerAdd0 (engine, &sublayer, NULL);
+
+out:
+  if (engine)
+    FwpmEngineClose0 (engine);
+  return err;
+}
+
+bool
+win_wfp_add_filter (HANDLE engineHandle,
+                    const FWPM_FILTER0 *filter,
+                    PSECURITY_DESCRIPTOR sd,
+                    UINT64 *id)
+{
+    if (FwpmFilterAdd0(engineHandle, filter, sd, id) != ERROR_SUCCESS)
+    {
+        msg (M_NONFATAL, "Can't add WFP filter");
+        return false;
+    }
+    return true;
+}
+
+bool
+win_wfp_block_dns (const NET_IFINDEX index)
+{
+    FWPM_SESSION0 session = {0};
+    FWPM_SUBLAYER0 *sublayer_ptr = NULL;
+    NET_LUID tapluid;
+    UINT64 filterid;
+    WCHAR openvpnpath[MAX_PATH];
+    FWP_BYTE_BLOB *openvpnblob = NULL;
+    FWPM_FILTER0 Filter = {0};
+    FWPM_FILTER_CONDITION0 Condition[2] = {0};
+    DWORD status;
+
+    /* Add temporary filters which don't survive reboots or crashes. */
+    session.flags = FWPM_SESSION_FLAG_DYNAMIC;
+
+    dmsg (D_LOW, "Opening WFP engine");
+
+    if (FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, &session, &m_hEngineHandle) != ERROR_SUCCESS)
+    {
+        msg (M_NONFATAL, "Can't open WFP engine");
+        return false;
+    }
+
+    /* Check sublayer exists and add one if it does not. */
+    if (FwpmSubLayerGetByKey0 (m_hEngineHandle, &OPENVPN_BLOCK_OUTSIDE_DNS_SUBLAYER, &sublayer_ptr)
+            == ERROR_SUCCESS)
+    {
+        msg (D_LOW, "Retrieved existing sublayer");
+        FwpmFreeMemory0 ((void **)&sublayer_ptr);
+    }
+    else
+    {  /* Add a new sublayer -- as another process may add it in the meantime,
+          do not treat "already exists" as an error */
+        status = add_sublayer (OPENVPN_BLOCK_OUTSIDE_DNS_SUBLAYER);
+
+        if (status == FWP_E_ALREADY_EXISTS || status == ERROR_SUCCESS)
+            msg (D_LOW, "Added a persistent sublayer with pre-defined UUID");
+        else
+        {
+            msg (M_NONFATAL, "Failed to add persistent sublayer (status = %lu)", status);
+            goto err;
+        }
+    }
+
+    dmsg (M_INFO, "Blocking DNS using WFP");
+    if (ConvertInterfaceIndexToLuid(index, &tapluid) != NO_ERROR)
+    {
+        msg (M_NONFATAL, "Can't convert interface index to LUID");
+        goto err;
+    }
+    dmsg (D_LOW, "Tap Luid: %I64d", tapluid.Value);
+
+    /* Get OpenVPN path. */
+    status = GetModuleFileNameW(NULL, openvpnpath, _countof(openvpnpath));
+    if (status == 0 || status == _countof(openvpnpath))
+    {
+        msg(M_WARN|M_ERRNO, "block_dns: failed to get executable path");
+        goto err;
+    }
+
+    if (FwpmGetAppIdFromFileName0(openvpnpath, &openvpnblob) != ERROR_SUCCESS)
+        goto err;
+
+    /* Prepare filter. */
+    Filter.subLayerKey = OPENVPN_BLOCK_OUTSIDE_DNS_SUBLAYER;
+    Filter.displayData.name = FIREWALL_NAME;
+    Filter.weight.type = FWP_UINT8;
+    Filter.weight.uint8 = 0xF;
+    Filter.filterCondition = Condition;
+    Filter.numFilterConditions = 2;
+
+    /* First filter. Permit IPv4 DNS queries from OpenVPN itself. */
+    Filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
+    Filter.action.type = FWP_ACTION_PERMIT;
+
+    Condition[0].fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
+    Condition[0].matchType = FWP_MATCH_EQUAL;
+    Condition[0].conditionValue.type = FWP_UINT16;
+    Condition[0].conditionValue.uint16 = 53;
+
+    Condition[1].fieldKey = FWPM_CONDITION_ALE_APP_ID;
+    Condition[1].matchType = FWP_MATCH_EQUAL;
+    Condition[1].conditionValue.type = FWP_BYTE_BLOB_TYPE;
+    Condition[1].conditionValue.byteBlob = openvpnblob;
+
+    /* Add filter condition to our interface. */
+    if (!win_wfp_add_filter(m_hEngineHandle, &Filter, NULL, &filterid))
+        goto err;
+    dmsg (D_LOW, "Filter (Permit OpenVPN IPv4 DNS) added with ID=%I64d", filterid);
+
+    /* Second filter. Permit IPv6 DNS queries from OpenVPN itself. */
+    Filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V6;
+
+    /* Add filter condition to our interface. */
+    if (!win_wfp_add_filter(m_hEngineHandle, &Filter, NULL, &filterid))
+        goto err;
+    dmsg (D_LOW, "Filter (Permit OpenVPN IPv6 DNS) added with ID=%I64d", filterid);
+
+    /* Third filter. Block all IPv4 DNS queries. */
+    Filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
+    Filter.action.type = FWP_ACTION_BLOCK;
+    Filter.weight.type = FWP_EMPTY;
+    Filter.numFilterConditions = 1;
+
+    if (!win_wfp_add_filter(m_hEngineHandle, &Filter, NULL, &filterid))
+        goto err;
+    dmsg (D_LOW, "Filter (Block IPv4 DNS) added with ID=%I64d", filterid);
+
+    /* Forth filter. Block all IPv6 DNS queries. */
+    Filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V6;
+
+    if (!win_wfp_add_filter(m_hEngineHandle, &Filter, NULL, &filterid))
+        goto err;
+    dmsg (D_LOW, "Filter (Block IPv6 DNS) added with ID=%I64d", filterid);
+
+    /* Fifth filter. Permit IPv4 DNS queries from TAP.
+     * Use a non-zero weight so that the permit filters get higher priority
+     * over the block filter added with automatic weighting */
+
+    Filter.weight.type = FWP_UINT8;
+    Filter.weight.uint8 = 0xE;
+    Filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
+    Filter.action.type = FWP_ACTION_PERMIT;
+    Filter.numFilterConditions = 2;
+
+    Condition[1].fieldKey = FWPM_CONDITION_IP_LOCAL_INTERFACE;
+    Condition[1].matchType = FWP_MATCH_EQUAL;
+    Condition[1].conditionValue.type = FWP_UINT64;
+    Condition[1].conditionValue.uint64 = &tapluid.Value;
+
+    /* Add filter condition to our interface. */
+    if (!win_wfp_add_filter(m_hEngineHandle, &Filter, NULL, &filterid))
+        goto err;
+    dmsg (D_LOW, "Filter (Permit IPv4 DNS queries from TAP) added with ID=%I64d", filterid);
+
+    /* Sixth filter. Permit IPv6 DNS queries from TAP.
+     * Use same weight as IPv4 filter */
+    Filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V6;
+
+    /* Add filter condition to our interface. */
+    if (!win_wfp_add_filter(m_hEngineHandle, &Filter, NULL, &filterid))
+        goto err;
+    dmsg (D_LOW, "Filter (Permit IPv6 DNS queries from TAP) added with ID=%I64d", filterid);
+
+    FwpmFreeMemory0((void **)&openvpnblob);
+    return true;
+
+    err:
+        if (openvpnblob)
+           FwpmFreeMemory0((void **)&openvpnblob);
+        if (m_hEngineHandle)
+        {
+            FwpmEngineClose0 (m_hEngineHandle);
+            m_hEngineHandle = NULL;
+        }
+
+        return false;
+}
+
+bool
+win_wfp_uninit()
+{
+    dmsg (D_LOW, "Uninitializing WFP");
+    if (m_hEngineHandle) {
+        FwpmEngineClose0(m_hEngineHandle);
+        m_hEngineHandle = NULL;
+    }
+    return true;
+}
+
+int
+win32_version_info()
+{
+    if (!IsWindowsXPOrGreater())
+    {
+        msg (M_FATAL, "Error: Windows version must be XP or greater.");
+    }
+
+    if (!IsWindowsVistaOrGreater())
+    {
+        return WIN_XP;
+    }
+
+    if (!IsWindows7OrGreater())
+    {
+        return WIN_VISTA;
+    }
+
+    if (!IsWindows8OrGreater())
+    {
+        return WIN_7;
+    }
+    else
+    {
+        return WIN_8;
+    }
+}
+
+bool
+win32_is_64bit()
+{
+#if defined(_WIN64)
+    return true;  // 64-bit programs run only on Win64
+#elif defined(_WIN32)
+    // 32-bit programs run on both 32-bit and 64-bit Windows
+    BOOL f64 = FALSE;
+    return IsWow64Process(GetCurrentProcess(), &f64) && f64;
+#else
+    return false; // Win64 does not support Win16
+#endif
+}
+
+const char *
+win32_version_string(struct gc_arena *gc, bool add_name)
+{
+    int version = win32_version_info();
+    struct buffer out = alloc_buf_gc (256, gc);
+
+    switch (version)
+    {
+        case WIN_XP:
+            buf_printf (&out, "5.1%s", add_name ? " (Windows XP)" : "");
+            break;
+        case WIN_VISTA:
+            buf_printf (&out, "6.0%s", add_name ? " (Windows Vista)" : "");
+            break;
+        case WIN_7:
+            buf_printf (&out, "6.1%s", add_name ? " (Windows 7)" : "");
+            break;
+        case WIN_8:
+            buf_printf (&out, "6.2%s", add_name ? " (Windows 8 or greater)" : "");
+            break;
+        default:
+            msg (M_NONFATAL, "Unknown Windows version: %d", version);
+            buf_printf (&out, "0.0%s", add_name ? " (unknown)" : "");
+            break;
+    }
+
+    buf_printf (&out, win32_is_64bit() ? " 64bit" : " 32bit");
+
+    return (const char *)out.data;
+}
+
 #endif

@@ -5,8 +5,8 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
- *  Copyright (C) 2010 Fox Crypto B.V. <openvpn@fox-it.com>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2010-2017 Fox Crypto B.V. <openvpn@fox-it.com>
  *  Copyright (C) 2008-2013 David Sommerseth <dazo@users.sourceforge.net>
  *
  *  This program is free software; you can redistribute it and/or modify
@@ -43,6 +43,7 @@
 #endif
 
 #include "syshead.h"
+#include "win32.h"
 
 #if defined(ENABLE_CRYPTO) && defined(ENABLE_SSL)
 
@@ -149,6 +150,7 @@ static const tls_cipher_name_pair tls_cipher_name_translation_table[] = {
     {"DHE-RSA-CAMELLIA128-SHA", "TLS-DHE-RSA-WITH-CAMELLIA-128-CBC-SHA"},
     {"DHE-RSA-CAMELLIA256-SHA256", "TLS-DHE-RSA-WITH-CAMELLIA-256-CBC-SHA256"},
     {"DHE-RSA-CAMELLIA256-SHA", "TLS-DHE-RSA-WITH-CAMELLIA-256-CBC-SHA"},
+    {"DHE-RSA-CHACHA20-POLY1305", "TLS-DHE-RSA-WITH-CHACHA20-POLY1305-SHA256"},
     {"DHE-RSA-SEED-SHA", "TLS-DHE-RSA-WITH-SEED-CBC-SHA"},
     {"DH-RSA-SEED-SHA", "TLS-DH-RSA-WITH-SEED-CBC-SHA"},
     {"ECDH-ECDSA-AES128-GCM-SHA256", "TLS-ECDH-ECDSA-WITH-AES-128-GCM-SHA256"},
@@ -177,6 +179,7 @@ static const tls_cipher_name_pair tls_cipher_name_translation_table[] = {
     {"ECDHE-ECDSA-CAMELLIA128-SHA", "TLS-ECDHE-ECDSA-WITH-CAMELLIA-128-CBC-SHA"},
     {"ECDHE-ECDSA-CAMELLIA256-SHA256", "TLS-ECDHE-ECDSA-WITH-CAMELLIA-256-CBC-SHA256"},
     {"ECDHE-ECDSA-CAMELLIA256-SHA", "TLS-ECDHE-ECDSA-WITH-CAMELLIA-256-CBC-SHA"},
+    {"ECDHE-ECDSA-CHACHA20-POLY1305", "TLS-ECDHE-ECDSA-WITH-CHACHA20-POLY1305-SHA256"},
     {"ECDHE-ECDSA-DES-CBC3-SHA", "TLS-ECDHE-ECDSA-WITH-3DES-EDE-CBC-SHA"},
     {"ECDHE-ECDSA-DES-CBC-SHA", "TLS-ECDHE-ECDSA-WITH-DES-CBC-SHA"},
     {"ECDHE-ECDSA-RC4-SHA", "TLS-ECDHE-ECDSA-WITH-RC4-128-SHA"},
@@ -192,6 +195,7 @@ static const tls_cipher_name_pair tls_cipher_name_translation_table[] = {
     {"ECDHE-RSA-CAMELLIA128-SHA", "TLS-ECDHE-RSA-WITH-CAMELLIA-128-CBC-SHA"},
     {"ECDHE-RSA-CAMELLIA256-SHA256", "TLS-ECDHE-RSA-WITH-CAMELLIA-256-CBC-SHA256"},
     {"ECDHE-RSA-CAMELLIA256-SHA", "TLS-ECDHE-RSA-WITH-CAMELLIA-256-CBC-SHA"},
+    {"ECDHE-RSA-CHACHA20-POLY1305", "TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256"},
     {"ECDHE-RSA-DES-CBC3-SHA", "TLS-ECDHE-RSA-WITH-3DES-EDE-CBC-SHA"},
     {"ECDHE-RSA-DES-CBC-SHA", "TLS-ECDHE-RSA-WITH-DES-CBC-SHA"},
     {"ECDHE-RSA-RC4-SHA", "TLS-ECDHE-RSA-WITH-RC4-128-SHA"},
@@ -263,8 +267,29 @@ tls_get_cipher_name_pair (const char * cipher_name, size_t len) {
       pair++;
   }
 
-  // No entry found, return NULL
+  /* No entry found, return NULL */
   return NULL;
+}
+
+/**
+ * Limit the reneg_bytes value when using a small-block (<128 bytes) cipher.
+ *
+ * @param cipher	The current cipher (may be NULL).
+ * @param reneg_bytes	Pointer to the current reneg_bytes, updated if needed.
+ * 			May *not* be NULL.
+ */
+static void
+tls_limit_reneg_bytes (const cipher_kt_t *cipher, int *reneg_bytes)
+{
+  if (cipher && (cipher_kt_block_size(cipher) < 128/8))
+    {
+      if (*reneg_bytes == -1) /* Not user-specified */
+	{
+	  msg (M_WARN, "WARNING: cipher with small block size in use, "
+	       "reducing reneg-bytes to 64MB to mitigate SWEET32 attacks.");
+	  *reneg_bytes = 64 * 1024 * 1024;
+	}
+    }
 }
 
 /*
@@ -301,8 +326,9 @@ tls_init_control_channel_frame_parameters(const struct frame *data_channel_frame
   reliable_ack_adjust_frame_parameters (frame, CONTROL_SEND_ACK_MAX);
   frame_add_to_extra_frame (frame, SID_SIZE + sizeof (packet_id_type));
 
-  /* set dynamic link MTU to minimum value */
-  frame_set_mtu_dynamic (frame, 0, SET_MTU_TUN);
+  /* set dynamic link MTU to cap control channel packets at 1250 bytes */
+  ASSERT (TUN_LINK_DELTA (frame) < min_int (frame->link_mtu, 1250));
+  frame->link_mtu_dynamic = min_int (frame->link_mtu, 1250) - TUN_LINK_DELTA (frame);
 }
 
 void
@@ -333,7 +359,7 @@ void
 pem_password_setup (const char *auth_file)
 {
   if (!strlen (passbuf.password))
-    get_user_pass (&passbuf, auth_file, UP_TYPE_PRIVATE_KEY, GET_USER_PASS_MANAGEMENT|GET_USER_PASS_SENSITIVE|GET_USER_PASS_PASSWORD_ONLY);
+    get_user_pass (&passbuf, auth_file, UP_TYPE_PRIVATE_KEY, GET_USER_PASS_MANAGEMENT|GET_USER_PASS_PASSWORD_ONLY);
 }
 
 int
@@ -376,11 +402,11 @@ auth_user_pass_setup (const char *auth_file, const struct static_challenge_info 
        get_user_pass_cr (&auth_user_pass,
                          auth_file,
                          UP_TYPE_AUTH,
-                         GET_USER_PASS_MANAGEMENT|GET_USER_PASS_SENSITIVE|GET_USER_PASS_DYNAMIC_CHALLENGE,
+                         GET_USER_PASS_MANAGEMENT|GET_USER_PASS_DYNAMIC_CHALLENGE,
                          auth_challenge);
       else if (sci) /* static challenge response */
        {
-         int flags = GET_USER_PASS_MANAGEMENT|GET_USER_PASS_SENSITIVE|GET_USER_PASS_STATIC_CHALLENGE;
+         int flags = GET_USER_PASS_MANAGEMENT|GET_USER_PASS_STATIC_CHALLENGE;
          if (sci->flags & SC_ECHO)
            flags |= GET_USER_PASS_STATIC_CHALLENGE_ECHO;
          get_user_pass_cr (&auth_user_pass,
@@ -391,7 +417,7 @@ auth_user_pass_setup (const char *auth_file, const struct static_challenge_info 
        }
       else
 # endif
-       get_user_pass (&auth_user_pass, auth_file, UP_TYPE_AUTH, GET_USER_PASS_MANAGEMENT|GET_USER_PASS_SENSITIVE);
+       get_user_pass (&auth_user_pass, auth_file, UP_TYPE_AUTH, GET_USER_PASS_MANAGEMENT);
 #endif
     }
 }
@@ -404,6 +430,8 @@ ssl_set_auth_nocache (void)
 {
   passbuf.nocache = true;
   auth_user_pass.nocache = true;
+  /* wait for push-reply, because auth-token may invert nocache */
+  auth_user_pass.wait_for_push = true;
 }
 
 /*
@@ -412,6 +440,13 @@ ssl_set_auth_nocache (void)
 void
 ssl_set_auth_token (const char *token)
 {
+  if (auth_user_pass.nocache)
+    {
+      msg(M_INFO,
+          "auth-token received, disabling auth-nocache for the "
+          "authentication token");
+      auth_user_pass.nocache = false;
+    }
   set_auth_token (&auth_user_pass, token);
 }
 
@@ -555,11 +590,11 @@ init_ssl (const struct options *options, struct tls_root_ctx *new_ctx)
       tls_ctx_load_extra_certs(new_ctx, options->extra_certs_file, options->extra_certs_file_inline);
     }
 
+  /* Check certificate notBefore and notAfter */
+  tls_ctx_check_cert_time(new_ctx);
+
   /* Allowable ciphers */
-  if (options->cipher_list)
-    {
-      tls_ctx_restrict_ciphers(new_ctx, options->cipher_list);
-    }
+  tls_ctx_restrict_ciphers(new_ctx, options->cipher_list);
 
 #ifdef ENABLE_CRYPTO_POLARSSL
   /* Personalise the random by mixing in the certificate */
@@ -1401,7 +1436,7 @@ tls1_P_hash(const md_kt_t *md_kt,
     }
   hmac_ctx_cleanup(&ctx);
   hmac_ctx_cleanup(&ctx_tmp);
-  CLEAR (A1);
+  secure_memzero (A1, sizeof (A1));
 
   dmsg (D_SHOW_KEY_SOURCE, "tls1_P_hash out: %s", format_hex (out_orig, olen_orig, 0, &gc));
   gc_free (&gc);
@@ -1511,13 +1546,10 @@ generate_key_expansion (struct key_ctx_bi *key,
 			const struct session_id *server_sid,
 			bool server)
 {
-  uint8_t master[48];
-  struct key2 key2;
+  uint8_t master[48] = { 0 };
+  struct key2 key2 = { 0 };
   bool ret = false;
   int i;
-
-  CLEAR (master);
-  CLEAR (key2);
 
   /* debugging print of source key material */
   key_source2_print (key_src);
@@ -1582,8 +1614,8 @@ generate_key_expansion (struct key_ctx_bi *key,
   ret = true;
 
  exit:
-  CLEAR (master);
-  CLEAR (key2);
+  secure_memzero (&master, sizeof (master));
+  secure_memzero (&key2, sizeof (key2));
 
   return ret;
 }
@@ -1780,7 +1812,7 @@ key_method_1_write (struct buffer *buf, struct tls_session *session)
 
   init_key_ctx (&ks->key.encrypt, &key, &session->opt->key_type,
 		OPENVPN_OP_ENCRYPT, "Data Channel Encrypt");
-  CLEAR (key);
+  secure_memzero (&key, sizeof (key));
 
   /* send local options string */
   {
@@ -1844,14 +1876,19 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
 	  if (rgi.flags & RGI_HWADDR_DEFINED)
 	    buf_printf (&out, "IV_HWADDR=%s\n", format_hex_ex (rgi.hwaddr, 6, 0, 1, ":", &gc));
 	  buf_printf (&out, "IV_SSL=%s\n", get_ssl_library_version() );
+#if defined(WIN32)
+	  buf_printf (&out, "IV_PLAT_VER=%s\n", win32_version_string (&gc, false));
+#endif
         }
 
-      /* push env vars that begin with UV_ and IV_GUI_VER */
+      /* push env vars that begin with UV_, IV_PLAT_VER and IV_GUI_VER */
       for (e=es->list; e != NULL; e=e->next)
 	{
 	  if (e->string)
 	    {
-	      if (((strncmp(e->string, "UV_", 3)==0 && session->opt->push_peer_info_detail >= 2)
+	      if ((((strncmp(e->string, "UV_", 3)==0 ||
+		     strncmp(e->string, "IV_PLAT_VER=", sizeof("IV_PLAT_VER=")-1)==0)
+		    && session->opt->push_peer_info_detail >= 2)
 		   || (strncmp(e->string,"IV_GUI_VER=",sizeof("IV_GUI_VER=")-1)==0))
 		  && buf_safe(&out, strlen(e->string)+1))
 		buf_printf (&out, "%s\n", e->string);
@@ -1913,7 +1950,21 @@ key_method_2_write (struct buffer *buf, struct tls_session *session)
 	goto error;
       if (!write_string (buf, auth_user_pass.password, -1))
 	goto error;
-      purge_user_pass (&auth_user_pass, false);
+      /* if auth-nocache was specified, the auth_user_pass object reaches
+       * a "complete" state only after having received the push-reply
+       * message.
+       * This is the case because auth-token statement in a push-reply would
+       * invert its nocache.
+       *
+       * For this reason, skip the purge operation here if no push-reply
+       * message has been received yet.
+       *
+       * This normally happens upon first negotiation only.
+       */
+      if (!auth_user_pass.wait_for_push)
+        {
+          purge_user_pass(&auth_user_pass, false);
+        }
     }
   else
     {
@@ -1945,14 +1996,16 @@ key_method_2_write (struct buffer *buf, struct tls_session *session)
 	    }
 	}
 		      
-      CLEAR (*ks->key_src);
+      secure_memzero (ks->key_src, sizeof (*ks->key_src));
+      tls_limit_reneg_bytes (session->opt->key_type.cipher,
+			     &session->opt->renegotiate_bytes);
     }
 
   return true;
 
  error:
   msg (D_TLS_ERRORS, "TLS Error: Key Method #2 write failed");
-  CLEAR (*ks->key_src);
+  secure_memzero (ks->key_src, sizeof (*ks->key_src));
   return false;
 }
 
@@ -2007,13 +2060,13 @@ key_method_1_read (struct buffer *buf, struct tls_session *session)
 
   init_key_ctx (&ks->key.decrypt, &key, &session->opt->key_type,
 		OPENVPN_OP_DECRYPT, "Data Channel Decrypt");
-  CLEAR (key);
+  secure_memzero (&key, sizeof (key));
   ks->authenticated = true;
   return true;
 
  error:
   buf_clear (buf);
-  CLEAR (key);
+  secure_memzero (&key, sizeof (key));
   return false;
 }
 
@@ -2078,7 +2131,7 @@ key_method_2_read (struct buffer *buf, struct tls_multi *multi, struct tls_sessi
 
       if (!username_status || !password_status)
 	{
-	  CLEAR (*up);
+	  secure_memzero (up, sizeof(*up));
 	  if (!(session->opt->ssl_flags & SSLF_AUTH_USER_PASS_OPTIONAL))
 	    {
 	      msg (D_TLS_ERRORS, "TLS Error: Auth Username/Password was not provided by peer");
@@ -2093,7 +2146,7 @@ key_method_2_read (struct buffer *buf, struct tls_multi *multi, struct tls_sessi
 #endif
 
       verify_user_pass(up, multi, session);
-      CLEAR (*up);
+      secure_memzero (up, sizeof (*up));
     }
   else
     {
@@ -2155,14 +2208,14 @@ key_method_2_read (struct buffer *buf, struct tls_multi *multi, struct tls_sessi
 	  goto error;
 	}
 		      
-      CLEAR (*ks->key_src);
+      secure_memzero (ks->key_src, sizeof (*ks->key_src));
     }
 
   gc_free (&gc);
   return true;
 
  error:
-  CLEAR (*ks->key_src);
+  secure_memzero (ks->key_src, sizeof (*ks->key_src));
   buf_clear (buf);
   gc_free (&gc);
   return false;
@@ -2212,7 +2265,7 @@ tls_process (struct tls_multi *multi,
   if (ks->state >= S_ACTIVE &&
       ((session->opt->renegotiate_seconds
 	&& now >= ks->established + session->opt->renegotiate_seconds)
-       || (session->opt->renegotiate_bytes
+       || (session->opt->renegotiate_bytes > 0
 	   && ks->n_bytes >= session->opt->renegotiate_bytes)
        || (session->opt->renegotiate_packets
 	   && ks->n_packets >= session->opt->renegotiate_packets)
@@ -3195,7 +3248,12 @@ tls_pre_decrypt (struct tls_multi *multi,
 			    /* Save incoming ciphertext packet to reliable buffer */
 			    struct buffer *in = reliable_get_buf (ks->rec_reliable);
 			    ASSERT (in);
-			    ASSERT (buf_copy (in, buf));
+			    if (!buf_copy (in, buf))
+			      {
+				msg (D_MULTI_DROPPED,
+				     "Incoming control channel packet too big, dropping.");
+				goto error;
+			      }
 			    reliable_mark_active_incoming (ks->rec_reliable, in, id, op);
 			  }
 
@@ -3585,6 +3643,13 @@ print_data:
 
 done:
   return BSTR (&out);
+}
+
+void
+delayed_auth_pass_purge(void)
+{
+    auth_user_pass.wait_for_push = false;
+    purge_user_pass(&auth_user_pass, false);
 }
 
 #else

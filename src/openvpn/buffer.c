@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -155,7 +155,9 @@ void
 buf_clear (struct buffer *buf)
 {
   if (buf->capacity > 0)
-    memset (buf->data, 0, buf->capacity);
+    {
+      secure_memzero (buf->data, buf->capacity);
+    }
   buf->len = 0;
   buf->offset = 0;
 }
@@ -400,9 +402,13 @@ format_hex_ex (const uint8_t *data, int size, int maxoutput,
 	       int space_break, const char* separator,
 	       struct gc_arena *gc)
 {
-  struct buffer out = alloc_buf_gc (maxoutput ? maxoutput :
-				    ((size * 2) + (size / space_break) * (int) strlen (separator) + 2),
-				    gc);
+  const size_t separator_len = separator ? strlen (separator) : 0;
+  static_assert (INT_MAX <= SIZE_MAX, "Code assumes INT_MAX <= SIZE_MAX");
+  const size_t out_len = maxoutput > 0 ? maxoutput :
+	    ((size * 2) + ((size / space_break) * separator_len) + 2);
+
+  struct buffer out = alloc_buf_gc (out_len, gc);
+
   int i;
   for (i = 0; i < size; ++i)
     {
@@ -575,9 +581,7 @@ string_clear (char *str)
 {
   if (str)
     {
-      const int len = strlen (str);
-      if (len > 0)
-	memset (str, 0, len);
+      secure_memzero (str, strlen (str));
     }
 }
 

@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -291,7 +291,7 @@ plugin_init_item (struct plugin *p, const struct plugin_option *o)
 static void
 plugin_vlog (openvpn_plugin_log_flags_t flags, const char *name, const char *format, va_list arglist)
 {
-  unsigned int msg_flags;
+  unsigned int msg_flags = 0;
 
   if (!format)
     return;
@@ -316,7 +316,7 @@ plugin_vlog (openvpn_plugin_log_flags_t flags, const char *name, const char *for
   if (flags & PLOG_NOMUTE)
     msg_flags |= M_NOMUTE;
 
-  if (MSG_TEST (msg_flags))
+  if (msg_test (msg_flags))
     {
       struct gc_arena gc;
       char* msg_fmt;

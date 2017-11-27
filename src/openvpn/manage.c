@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -2975,7 +2975,7 @@ management_query_user_pass (struct management *man,
 	  man->connection.up_query.nocache = up->nocache; /* preserve caller's nocache setting */
 	  *up = man->connection.up_query;
 	}
-      CLEAR (man->connection.up_query);
+      secure_memzero (&man->connection.up_query, sizeof (man->connection.up_query));
     }
 
   gc_free (&gc);

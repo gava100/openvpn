@@ -5,7 +5,7 @@
 #             packet encryption, packet authentication, and
 #             packet compression.
 #
-#  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+#  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
 #  Copyright (C) 2006-2012 Alon Bar-Lev <alon.barlev@gmail.com>
 #
 
@@ -26,4 +26,5 @@ libcompat_la_SOURCES = \
 	compat-gettimeofday.c \
 	compat-daemon.c \
 	compat-inet_ntop.c \
-	compat-inet_pton.c
+	compat-inet_pton.c \
+	compat-versionhelpers.h

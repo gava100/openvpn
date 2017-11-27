@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -42,6 +42,7 @@
 #include "manage.h"
 #include "win32.h"
 #include "options.h"
+#include "win32.h"
 
 #include "memdbg.h"
 
@@ -390,7 +391,7 @@ init_route_ipv6 (struct route_ipv6 *r6,
 {
   r6->defined = false;
 
-  if ( !get_ipv6_addr( r6o->prefix, &r6->network, &r6->netbits, NULL, M_WARN ))
+  if ( !get_ipv6_addr( r6o->prefix, &r6->network, &r6->netbits, M_WARN ))
     goto fail;
 
   /* gateway */
@@ -648,7 +649,7 @@ init_route_list (struct route_list *rl,
     bool warned = false;
     for (i = 0; i < opt->n; ++i)
       {
-        struct addrinfo* netlist;
+        struct addrinfo* netlist = NULL;
 	struct route_ipv4 r;
 
 	if (!init_route (&r,
@@ -675,8 +676,9 @@ init_route_list (struct route_list *rl,
 		      }
 		  }
 	      }
-            freeaddrinfo(netlist);
 	  }
+	if (netlist)
+	  freeaddrinfo(netlist);
       }
     rl->n = j;
   }
@@ -838,11 +840,18 @@ redirect_default_route_to_vpn (struct route_list *rl, const struct tuntap *tt, u
 
   if ( rl && rl->flags & RG_ENABLE )
     {
+      bool local = BOOL_CAST(rl->flags & RG_LOCAL);
       if (!(rl->spec.flags & RTSA_REMOTE_ENDPOINT) && (rl->flags & RG_REROUTE_GW))
 	{
 	  msg (M_WARN, "%s VPN gateway parameter (--route-gateway or --ifconfig) is missing", err);
 	}
-      else if (!(rl->rgi.flags & RGI_ADDR_DEFINED))
+      /*
+       * check if a default route is defined, unless:
+       * - we are connecting to a remote host in our network
+       * - we are connecting to a non-IPv4 remote host (i.e. we use IPv6)
+       */
+      else if (!(rl->rgi.flags & RGI_ADDR_DEFINED) && !local
+	       && (rl->spec.remote_host != IPV4_INVALID_ADDR))
 	{
 	  msg (M_WARN, "%s Cannot read current default gateway from system", err);
 	}
@@ -852,7 +861,6 @@ redirect_default_route_to_vpn (struct route_list *rl, const struct tuntap *tt, u
 	}
       else
 	{
-	  bool local = BOOL_CAST(rl->flags & RG_LOCAL);
 	  if (rl->flags & RG_AUTO_LOCAL) {
 	    const int tla = rl->spec.remote_host_local;
 	    if (tla == TLA_NONLOCAL)
@@ -912,14 +920,18 @@ redirect_default_route_to_vpn (struct route_list *rl, const struct tuntap *tt, u
 		}
 	      else
 		{
-		  /* delete default route */
-		  del_route3 (0,
-			      0,
-			      rl->rgi.gateway.addr,
-			      tt,
-			      flags | ROUTE_REF_GW,
-			      &rl->rgi,
-			      es);
+		  /* don't try to remove the def route if it does not exist */
+		  if (rl->rgi.flags & RGI_ADDR_DEFINED)
+		  {
+		      /* delete default route */
+		      del_route3 (0,
+				  0,
+				  rl->rgi.gateway.addr,
+				  tt,
+				  flags | ROUTE_REF_GW,
+				  &rl->rgi,
+				  es);
+		  }
 
 		  /* add new default route */
 		  add_route3 (0,
@@ -992,14 +1004,18 @@ undo_redirect_default_route_to_vpn (struct route_list *rl, const struct tuntap *
 			  &rl->rgi,
 			  es);
 
-	      /* restore original default route */
-	      add_route3 (0,
-			  0,
-			  rl->rgi.gateway.addr,
-			  tt,
-			  flags | ROUTE_REF_GW,
-			  &rl->rgi,
-			  es);
+	      /* restore original default route if there was any */
+	      if (rl->rgi.flags & RGI_ADDR_DEFINED)
+	        {
+		  /* restore original default route */
+		  add_route3 (0,
+			      0,
+			      rl->rgi.gateway.addr,
+			      tt,
+			      flags | ROUTE_REF_GW,
+			      &rl->rgi,
+			      es);
+	        }
 	    }
 	}
 
@@ -1096,7 +1112,7 @@ static const char *
 show_opt (const char *option)
 {
   if (!option)
-    return "nil";
+    return "default (not set)";
   else
     return option;
 }
@@ -1622,6 +1638,13 @@ add_route_ipv6 (struct route_ipv6 *r6, const struct tuntap *tt, unsigned int fla
 
 #elif defined (WIN32)
 
+  if (win32_version_info() != WIN_XP)
+    {
+      struct buffer out = alloc_buf_gc (64, &gc);
+      buf_printf (&out, "interface=%d", tt->adapter_index );
+      device = buf_bptr(&out);
+    }
+
   /* netsh interface ipv6 add route 2001:db8::/32 MyTunDevice */
   argv_printf (&argv, "%s%sc interface ipv6 add route %s/%d %s",
 	       get_win_sys_path(),
@@ -1952,6 +1975,13 @@ delete_route_ipv6 (const struct route_ipv6 *r6, const struct tuntap *tt, unsigne
   openvpn_execve_check (&argv, es, 0, "ERROR: Linux route -6/-A inet6 del command failed");
 
 #elif defined (WIN32)
+
+  if (win32_version_info() != WIN_XP)
+    {
+      struct buffer out = alloc_buf_gc (64, &gc);
+      buf_printf (&out, "interface=%d", tt->adapter_index );
+      device = buf_bptr(&out);
+    }
 
   /* netsh interface ipv6 delete route 2001:db8::/32 MyTunDevice */
   argv_printf (&argv, "%s%sc interface ipv6 delete route %s/%d %s",
@@ -2623,7 +2653,8 @@ void
 get_default_gateway (struct route_gateway_info *rgi)
 {
   struct gc_arena gc = gc_new ();
-  int s, seq, l, pid, rtm_addrs, i;
+  int s, seq, l, pid, rtm_addrs;
+  unsigned int i;
   struct sockaddr so_dst, so_mask;
   char *cp = m_rtmsg.m_space; 
   struct sockaddr *gate = NULL, *sa;
@@ -2760,7 +2791,8 @@ get_default_gateway (struct route_gateway_info *rgi)
   struct gc_arena gc = gc_new ();
   struct rtmsg m_rtmsg;
   int sockfd = -1;
-  int seq, l, pid, rtm_addrs, i;
+  int seq, l, pid, rtm_addrs;
+  unsigned int i;
   struct sockaddr so_dst, so_mask;
   char *cp = m_rtmsg.m_space; 
   struct sockaddr *gate = NULL, *ifp = NULL, *sa;
@@ -2960,7 +2992,8 @@ void
 get_default_gateway (struct route_gateway_info *rgi)
 {
   struct gc_arena gc = gc_new ();
-  int s, seq, l, rtm_addrs, i;
+  int s, seq, l, rtm_addrs;
+  unsigned int i;
   pid_t pid;
   struct sockaddr so_dst, so_mask;
   char *cp = m_rtmsg.m_space; 
@@ -2990,6 +3023,9 @@ get_default_gateway (struct route_gateway_info *rgi)
   rtm.rtm_flags = RTF_UP | RTF_GATEWAY;
   rtm.rtm_version = RTM_VERSION;
   rtm.rtm_seq = ++seq;
+#ifdef TARGET_OPENBSD
+  rtm.rtm_tableid = getrtable();
+#endif
   rtm.rtm_addrs = rtm_addrs; 
 
   so_dst.sa_family = AF_INET;
@@ -3195,7 +3231,7 @@ test_local_addr (const in_addr_t addr, const struct route_gateway_info *rgi)
 {
   struct gc_arena gc = gc_new ();
   const in_addr_t nonlocal_netmask = 0x80000000L; /* routes with netmask <= to this are considered non-local */
-  bool ret = TLA_NONLOCAL;
+  int ret = TLA_NONLOCAL;
 
   /* get full routing table */
   const MIB_IPFORWARDTABLE *rt = get_windows_routing_table (&gc);

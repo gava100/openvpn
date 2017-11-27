@@ -5,8 +5,8 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
- *  Copyright (C) 2010 Fox Crypto B.V. <openvpn@fox-it.com>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2010-2017 Fox Crypto B.V. <openvpn@fox-it.com>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -45,6 +45,8 @@
 #include <openssl/objects.h>
 #include <openssl/evp.h>
 #include <openssl/des.h>
+#include <openssl/err.h>
+#include <openssl/rand.h>
 
 /*
  * Check for key size creepage.
@@ -135,13 +137,15 @@ setup_engine (const char *engine)
       if ((e = ENGINE_by_id (engine)) == NULL
 	 && (e = try_load_engine (engine)) == NULL)
 	{
-	  msg (M_FATAL, "OpenSSL error: cannot load engine '%s'", engine);
+	  crypto_msg (M_FATAL, "OpenSSL error: cannot load engine '%s'",
+	      engine);
 	}
 
       if (!ENGINE_set_default (e, ENGINE_METHOD_ALL))
 	{
-	  msg (M_FATAL, "OpenSSL error: ENGINE_set_default failed on engine '%s'",
-	       engine);
+	  crypto_msg (M_FATAL,
+	      "OpenSSL error: ENGINE_set_default failed on engine '%s'",
+	      engine);
 	}
 
       msg (M_INFO, "Initializing OpenSSL support for engine '%s'",
@@ -230,6 +234,14 @@ crypto_clear_error (void)
   ERR_clear_error ();
 }
 
+void
+crypto_print_openssl_errors(const unsigned int flags) {
+  size_t err = 0;
+
+  while ((err = ERR_get_error ()))
+    msg (flags, "OpenSSL: %s", ERR_error_string (err, NULL));
+}
+
 /*
  *
  * OpenSSL memory debugging.  If dmalloc debugging is enabled, tell
@@ -268,21 +280,55 @@ crypto_init_dmalloc (void)
 
 const char *
 translate_cipher_name_from_openvpn (const char *cipher_name) {
-  // OpenSSL doesn't require any translation
+  /* OpenSSL doesn't require any translation */
   return cipher_name;
 }
 
 const char *
 translate_cipher_name_to_openvpn (const char *cipher_name) {
-  // OpenSSL doesn't require any translation
+  /* OpenSSL doesn't require any translation */
   return cipher_name;
+}
+
+static int
+cipher_name_cmp(const void *a, const void *b)
+{
+  const EVP_CIPHER * const *cipher_a = a;
+  const EVP_CIPHER * const *cipher_b = b;
+
+  const char *cipher_name_a =
+      translate_cipher_name_to_openvpn(EVP_CIPHER_name(*cipher_a));
+  const char *cipher_name_b =
+      translate_cipher_name_to_openvpn(EVP_CIPHER_name(*cipher_b));
+
+  return strcmp(cipher_name_a, cipher_name_b);
+}
+
+static void
+print_cipher(const EVP_CIPHER *cipher)
+{
+  const char *var_key_size =
+	(EVP_CIPHER_flags (cipher) & EVP_CIPH_VARIABLE_LENGTH) ?
+	     " by default" : "";
+  const char *ssl_only = cipher_kt_mode_cbc(cipher) ?
+	"" : ", TLS client/server mode only";
+
+  printf ("%s  (%d bit key%s, %d bit block%s)\n",
+	translate_cipher_name_to_openvpn (EVP_CIPHER_name (cipher)),
+	EVP_CIPHER_key_length (cipher) * 8, var_key_size,
+	cipher_kt_block_size (cipher) * 8, ssl_only);
 }
 
 void
 show_available_ciphers ()
 {
   int nid;
+  size_t i;
 
+  /* If we ever exceed this, we must be more selective */
+  const size_t cipher_list_len = 1000;
+  const EVP_CIPHER *cipher_list[cipher_list_len];
+  size_t num_ciphers = 0;
 #ifndef ENABLE_SMALL
   printf ("The following ciphers and cipher modes are available\n"
 	  "for use with " PACKAGE_NAME ".  Each cipher shown below may be\n"
@@ -292,29 +338,37 @@ show_available_ciphers ()
 	  "is recommended. In static key mode only CBC mode is allowed.\n\n");
 #endif
 
-  for (nid = 0; nid < 10000; ++nid)	/* is there a better way to get the size of the nid list? */
+  for (nid = 0; nid < 10000; ++nid)
     {
-      const EVP_CIPHER *cipher = EVP_get_cipherbynid (nid);
-      if (cipher)
-	{
-	  if (cipher_kt_mode_cbc(cipher)
+      const EVP_CIPHER *cipher = EVP_get_cipherbynid(nid);
+      if (cipher && (cipher_kt_mode_cbc(cipher)
 #ifdef ENABLE_OFB_CFB_MODE
 	      || cipher_kt_mode_ofb_cfb(cipher)
 #endif
-	      )
-	    {
-	      const char *var_key_size =
-		  (EVP_CIPHER_flags (cipher) & EVP_CIPH_VARIABLE_LENGTH) ?
-		       "variable" : "fixed";
-	      const char *ssl_only = cipher_kt_mode_ofb_cfb(cipher) ?
-		  " (TLS client/server mode)" : "";
-
-	      printf ("%s %d bit default key (%s)%s\n", OBJ_nid2sn (nid),
-		      EVP_CIPHER_key_length (cipher) * 8, var_key_size,
-		      ssl_only);
-	    }
+          ))
+	{
+	  cipher_list[num_ciphers++] = cipher;
+	}
+      if (num_ciphers == cipher_list_len)
+	{
+	  msg (M_WARN, "WARNING: Too many ciphers, not showing all");
+	  break;
 	}
     }
+
+  qsort (cipher_list, num_ciphers, sizeof(*cipher_list), cipher_name_cmp);
+
+  for (i = 0; i < num_ciphers; i++) {
+      if (cipher_kt_block_size(cipher_list[i]) >= 128/8)
+	print_cipher(cipher_list[i]);
+  }
+
+  printf ("\nThe following ciphers have a block size of less than 128 bits, \n"
+	  "and are therefore deprecated.  Do not use unless you have to.\n\n");
+  for (i = 0; i < num_ciphers; i++) {
+      if (cipher_kt_block_size(cipher_list[i]) < 128/8)
+	print_cipher(cipher_list[i]);
+  }
   printf ("\n");
 }
 
@@ -378,7 +432,12 @@ show_available_engines ()
 
 int rand_bytes(uint8_t *output, int len)
 {
-  return RAND_bytes (output, len);
+  if (unlikely(1 != RAND_bytes (output, len)))
+    {
+      crypto_msg(D_CRYPT_ERRORS, "RAND_bytes() failed");
+      return 0;
+    }
+  return 1;
 }
 
 /*
@@ -421,17 +480,20 @@ key_des_check (uint8_t *key, int key_len, int ndc)
       DES_cblock *dc = (DES_cblock*) buf_read_alloc (&b, sizeof (DES_cblock));
       if (!dc)
 	{
-	  msg (D_CRYPT_ERRORS, "CRYPTO INFO: check_key_DES: insufficient key material");
+	  crypto_msg (D_CRYPT_ERRORS,
+	      "CRYPTO INFO: check_key_DES: insufficient key material");
 	  goto err;
 	}
       if (DES_is_weak_key(dc))
 	{
-	  msg (D_CRYPT_ERRORS, "CRYPTO INFO: check_key_DES: weak key detected");
+	  crypto_msg (D_CRYPT_ERRORS,
+	      "CRYPTO INFO: check_key_DES: weak key detected");
 	  goto err;
 	}
       if (!DES_check_key_parity (dc))
 	{
-	  msg (D_CRYPT_ERRORS, "CRYPTO INFO: check_key_DES: bad parity detected");
+	  crypto_msg (D_CRYPT_ERRORS,
+	      "CRYPTO INFO: check_key_DES: bad parity detected");
 	  goto err;
 	}
     }
@@ -480,7 +542,7 @@ cipher_kt_get (const char *ciphername)
   cipher = EVP_get_cipherbyname (ciphername);
 
   if (NULL == cipher)
-    msg (M_SSLERR, "Cipher algorithm '%s' not found", ciphername);
+    crypto_msg (M_FATAL, "Cipher algorithm '%s' not found", ciphername);
 
   if (EVP_CIPHER_key_length (cipher) > MAX_CIPHER_KEY_LENGTH)
     msg (M_FATAL, "Cipher algorithm '%s' uses a default key size (%d bytes) which is larger than " PACKAGE_NAME "'s current maximum key size (%d bytes)",
@@ -512,9 +574,37 @@ cipher_kt_iv_size (const EVP_CIPHER *cipher_kt)
 }
 
 int
-cipher_kt_block_size (const EVP_CIPHER *cipher_kt)
-{
-  return EVP_CIPHER_block_size (cipher_kt);
+cipher_kt_block_size (const EVP_CIPHER *cipher) {
+  /* OpenSSL reports OFB/CFB/GCM cipher block sizes as '1 byte'.  To work
+   * around that, try to replace the mode with 'CBC' and return the block size
+   * reported for that cipher, if possible.  If that doesn't work, just return
+   * the value reported by OpenSSL.
+   */
+  char *name = NULL;
+  char *mode_str = NULL;
+  const char *orig_name = NULL;
+  const EVP_CIPHER *cbc_cipher = NULL;
+
+  int block_size = EVP_CIPHER_block_size(cipher);
+
+  orig_name = cipher_kt_name(cipher);
+  if (!orig_name)
+    goto cleanup;
+
+  name = string_alloc(translate_cipher_name_to_openvpn(orig_name), NULL);
+  mode_str = strrchr (name, '-');
+  if (!mode_str || strlen(mode_str) < 4)
+    goto cleanup;
+
+  strcpy (mode_str, "-CBC");
+
+  cbc_cipher = EVP_get_cipherbyname(translate_cipher_name_from_openvpn(name));
+  if (cbc_cipher)
+    block_size = EVP_CIPHER_block_size(cbc_cipher);
+
+cleanup:
+  free (name);
+  return block_size;
 }
 
 int
@@ -564,13 +654,13 @@ cipher_ctx_init (EVP_CIPHER_CTX *ctx, uint8_t *key, int key_len,
 
   EVP_CIPHER_CTX_init (ctx);
   if (!EVP_CipherInit (ctx, kt, NULL, NULL, enc))
-    msg (M_SSLERR, "EVP cipher init #1");
+    crypto_msg (M_FATAL, "EVP cipher init #1");
 #ifdef HAVE_EVP_CIPHER_CTX_SET_KEY_LENGTH
   if (!EVP_CIPHER_CTX_set_key_length (ctx, key_len))
-    msg (M_SSLERR, "EVP set key size");
+    crypto_msg (M_FATAL, "EVP set key size");
 #endif
   if (!EVP_CipherInit (ctx, NULL, key, NULL, enc))
-    msg (M_SSLERR, "EVP cipher init #2");
+    crypto_msg (M_FATAL, "EVP cipher init #2");
 
   /* make sure we used a big enough key */
   ASSERT (EVP_CIPHER_CTX_key_length (ctx) <= key_len);
@@ -617,7 +707,9 @@ int
 cipher_ctx_update (EVP_CIPHER_CTX *ctx, uint8_t *dst, int *dst_len,
     uint8_t *src, int src_len)
 {
-  return EVP_CipherUpdate (ctx, dst, dst_len, src, src_len);
+  if (!EVP_CipherUpdate (ctx, dst, dst_len, src, src_len))
+    crypto_msg(M_FATAL, "%s: EVP_CipherUpdate() failed", __func__);
+  return 1;
 }
 
 int
@@ -652,12 +744,14 @@ md_kt_get (const char *digest)
   ASSERT (digest);
   md = EVP_get_digestbyname (digest);
   if (!md)
-    msg (M_SSLERR, "Message hash algorithm '%s' not found", digest);
+    crypto_msg (M_FATAL, "Message hash algorithm '%s' not found", digest);
   if (EVP_MD_size (md) > MAX_HMAC_KEY_LENGTH)
-    msg (M_FATAL, "Message hash algorithm '%s' uses a default hash size (%d bytes) which is larger than " PACKAGE_NAME "'s current maximum hash size (%d bytes)",
-	 digest,
-	 EVP_MD_size (md),
-	 MAX_HMAC_KEY_LENGTH);
+    {
+      crypto_msg (M_FATAL, "Message hash algorithm '%s' uses a default hash "
+	  "size (%d bytes) which is larger than " PACKAGE_NAME "'s current "
+	  "maximum hash size (%d bytes)",
+	  digest, EVP_MD_size (md), MAX_HMAC_KEY_LENGTH);
+    }
   return md;
 }
 

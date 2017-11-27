@@ -5,8 +5,8 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
- *  Copyright (C) 2010 Fox Crypto B.V. <openvpn@fox-it.com>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2010-2017 Fox Crypto B.V. <openvpn@fox-it.com>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -502,6 +502,8 @@ void show_tls_performance_stats(void);
 
 /*#define EXTRACT_X509_FIELD_TEST*/
 void extract_x509_field_test (void);
+
+void delayed_auth_pass_purge(void);
 
 #endif /* ENABLE_CRYPTO && ENABLE_SSL */
 

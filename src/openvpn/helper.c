@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -167,7 +167,7 @@ helper_client_server (struct options *o)
    * push "tun-ipv6"
    * ifconfig-ipv6 2001:db8::1 2001:db8::2
    * if !nopool: 
-   *   ifconfig-ipv6-pool 2001:db8::1:0/64
+   *   ifconfig-ipv6-pool 2001:db8::1000/64
    * 
    */
    if ( o->server_ipv6_defined )
@@ -230,7 +230,7 @@ helper_client_server (struct options *o)
    * if tap OR (tun AND topology == subnet):
    *   ifconfig 10.8.0.1 255.255.255.0
    *   if !nopool: 
-   *     ifconfig-pool 10.8.0.2 10.8.0.254 255.255.255.0
+   *     ifconfig-pool 10.8.0.2 10.8.0.253 255.255.255.0
    *   push "route-gateway 10.8.0.1"
    *   if route-gateway unset:
    *     route-gateway 10.8.0.2

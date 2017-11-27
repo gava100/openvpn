@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -110,8 +110,12 @@ mss_fixup_ipv6 (struct buffer *buf, int maxmss)
   if ( pip6->nexthdr != OPENVPN_IPPROTO_TCP )
     return;
 
+  /* skip IPv6 header (40 bytes),
+   * verify remainder is large enough to contain a full TCP header
+   */
   newbuf = *buf;
-  if ( buf_advance( &newbuf, 40 ) )
+  if (buf_advance( &newbuf, 40 )
+      && BLEN(&newbuf) >= (int) sizeof(struct openvpn_tcphdr))
     {
       struct openvpn_tcphdr *tc = (struct openvpn_tcphdr *) BPTR (&newbuf);
       if (tc->flags & OPENVPN_TCPH_SYN_MASK)
@@ -129,11 +133,14 @@ mss_fixup_dowork (struct buffer *buf, uint16_t maxmss)
 {
   int hlen, olen, optlen;
   uint8_t *opt;
-  uint16_t *mss;
+  uint16_t mssval;
   int accumulate;
   struct openvpn_tcphdr *tc;
 
-  ASSERT (BLEN (buf) >= (int) sizeof (struct openvpn_tcphdr));
+  if (BLEN(buf) < (int) sizeof(struct openvpn_tcphdr))
+    {
+	return;
+    }
 
   verify_align_4 (buf);
   tc = (struct openvpn_tcphdr *) BPTR (buf);
@@ -146,7 +153,7 @@ mss_fixup_dowork (struct buffer *buf, uint16_t maxmss)
 
   for (olen = hlen - sizeof (struct openvpn_tcphdr),
 	 opt = (uint8_t *)(tc + 1);
-       olen > 0;
+       olen > 1;
        olen -= optlen, opt += optlen) {
     if (*opt == OPENVPN_TCPOPT_EOL)
       break;
@@ -159,14 +166,13 @@ mss_fixup_dowork (struct buffer *buf, uint16_t maxmss)
       if (*opt == OPENVPN_TCPOPT_MAXSEG) {
         if (optlen != OPENVPN_TCPOLEN_MAXSEG)
           continue;
-        mss = (uint16_t *)(opt + 2);
-        if (ntohs (*mss) > maxmss) {
-          dmsg (D_MSS, "MSS: %d -> %d",
-               (int) ntohs (*mss),
-	       (int) maxmss);
-          accumulate = *mss;
-          *mss = htons (maxmss);
-          accumulate -= *mss;
+	mssval = (opt[2]<<8)+opt[3];
+	if (mssval > maxmss) {
+	  dmsg (D_MSS, "MSS: %d -> %d", (int) mssval, (int) maxmss);
+	  accumulate = htons(mssval);
+	  opt[2] = (maxmss>>8)&0xff;
+	  opt[3] = maxmss&0xff;
+	  accumulate -= htons(maxmss);
           ADJUST_CHECKSUM (accumulate, tc->check);
         }
       }

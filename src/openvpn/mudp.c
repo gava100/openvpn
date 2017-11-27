@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -168,7 +168,6 @@ multi_process_io_udp (struct multi_context *m)
   else if (status & SOCKET_READ)
     {
       read_incoming_link (&m->top);
-      multi_release_io_lock (m);
       if (!IS_SIG (&m->top))
 	multi_process_incoming_link (m, NULL, mpp_flags);
     }
@@ -176,7 +175,6 @@ multi_process_io_udp (struct multi_context *m)
   else if (status & TUN_READ)
     {
       read_incoming_tun (&m->top);
-      multi_release_io_lock (m);
       if (!IS_SIG (&m->top))
 	multi_process_incoming_tun (m, mpp_flags);
     }

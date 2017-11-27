@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -40,11 +40,6 @@
  * OpenVPN's default port number as assigned by IANA.
  */
 #define OPENVPN_PORT 1194
-
-/*
- * Maximum size passed passed to setsockopt SNDBUF/RCVBUF
- */
-#define SOCKET_SND_RCV_BUF_MAX 1000000
 
 /*
  * Number of seconds that "resolv-retry infinite"
@@ -382,6 +377,11 @@ void setenv_in_addr_t (struct env_set *es,
 		       const char *name_prefix,
 		       in_addr_t addr,
 		       const unsigned int flags);
+
+void setenv_in6_addr (struct env_set *es,
+                      const char *name_prefix,
+                      const struct in6_addr *addr,
+                      const unsigned int flags);
 
 void setenv_link_socket_actual (struct env_set *es,
 				const char *name_prefix,
@@ -865,7 +865,6 @@ link_socket_read_udp_win32 (struct link_socket *sock,
 
 int link_socket_read_udp_posix (struct link_socket *sock,
 				struct buffer *buf,
-				int maxsize,
 				struct link_socket_actual *from);
 
 #endif
@@ -874,7 +873,6 @@ int link_socket_read_udp_posix (struct link_socket *sock,
 static inline int
 link_socket_read (struct link_socket *sock,
 		  struct buffer *buf,
-		  int maxsize,
 		  struct link_socket_actual *from)
 {
   if (proto_is_udp(sock->info.proto)) /* unified UDPv4 and UDPv6 */
@@ -884,7 +882,7 @@ link_socket_read (struct link_socket *sock,
 #ifdef WIN32
       res = link_socket_read_udp_win32 (sock, buf, from);
 #else
-      res = link_socket_read_udp_posix (sock, buf, maxsize, from);
+      res = link_socket_read_udp_posix (sock, buf, from);
 #endif
       return res;
     }

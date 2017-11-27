@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -62,9 +62,11 @@ static void netsh_ifconfig (const struct tuntap_options *to,
 			    const in_addr_t ip,
 			    const in_addr_t netmask,
 			    const unsigned int flags);
-static void netsh_command (const struct argv *a, int n);
+static void netsh_command (const struct argv *a, int n, int msglevel);
 
 static const char *netsh_get_id (const char *dev_node, struct gc_arena *gc);
+
+static DWORD get_adapter_index_flexible (const char *name);
 
 #endif
 
@@ -623,7 +625,8 @@ void delete_route_connected_v6_net(struct tuntap * tt,
 }
 #endif
 
-#if defined(TARGET_FREEBSD)||defined(TARGET_DRAGONFLY)
+#if defined(TARGET_FREEBSD)||defined(TARGET_DRAGONFLY)||\
+    defined(TARGET_OPENBSD)
 /* we can't use true subnet mode on tun on all platforms, as that
  * conflicts with IPv6 (wants to use ND then, which we don't do),
  * but the OSes want "a remote address that is different from ours"
@@ -633,8 +636,8 @@ void delete_route_connected_v6_net(struct tuntap * tt,
  * is still point to point and no layer 2 resolution is done...
  */
 
-char *
-create_arbitrary_remote( struct tuntap *tt, struct gc_arena * gc )
+in_addr_t
+create_arbitrary_remote( struct tuntap *tt )
 {
   in_addr_t remote;
 
@@ -642,7 +645,7 @@ create_arbitrary_remote( struct tuntap *tt, struct gc_arena * gc )
 
   if ( remote == tt->local ) remote ++;
 
-  return print_in_addr_t (remote, 0, &gc);
+  return remote;
 }
 #endif
 
@@ -914,6 +917,8 @@ do_ifconfig (struct tuntap *tt,
 
 #elif defined(TARGET_OPENBSD)
 
+      in_addr_t remote_end;		/* for "virtual" subnet topology */
+
       /*
        * On OpenBSD, tun interfaces are persistent if created with
        * "ifconfig tunX create", and auto-destroyed if created by
@@ -933,12 +938,13 @@ do_ifconfig (struct tuntap *tt,
       else
 	if ( tt->topology == TOP_SUBNET )
 	{
+	    remote_end = create_arbitrary_remote( tt );
 	    argv_printf (&argv,
 			  "%s %s %s %s mtu %d netmask %s up -link0",
 			  IFCONFIG_PATH,
 			  actual,
 			  ifconfig_local,
-			  ifconfig_local,
+			  print_in_addr_t (remote_end, 0, &gc),
 			  tun_mtu,
 			  ifconfig_remote_netmask
 			  );
@@ -955,6 +961,19 @@ do_ifconfig (struct tuntap *tt,
 			  );
       argv_msg (M_INFO, &argv);
       openvpn_execve_check (&argv, es, S_FATAL, "OpenBSD ifconfig failed");
+
+      /* Add a network route for the local tun interface */
+      if (!tun && tt->topology == TOP_SUBNET)
+        {
+          struct route_ipv4 r;
+          CLEAR (r);
+          r.flags = RT_DEFINED;
+          r.network = tt->local & tt->remote_netmask;
+          r.netmask = tt->remote_netmask;
+          r.gateway = remote_end;
+          add_route (&r, tt, 0, NULL, es);
+        }
+
       if ( do_ipv6 )
 	{
 	  argv_printf (&argv,
@@ -1124,6 +1143,8 @@ do_ifconfig (struct tuntap *tt,
 
 #elif defined(TARGET_FREEBSD)||defined(TARGET_DRAGONFLY)
 
+      in_addr_t remote_end;		/* for "virtual" subnet topology */
+
       /* example: ifconfig tun2 10.2.0.2 10.2.0.1 mtu 1450 netmask 255.255.255.255 up */
       if (tun)
 	argv_printf (&argv,
@@ -1136,12 +1157,13 @@ do_ifconfig (struct tuntap *tt,
 			  );
       else if ( tt->topology == TOP_SUBNET )
 	{
+	    remote_end = create_arbitrary_remote( tt );
 	    argv_printf (&argv,
 			  "%s %s %s %s mtu %d netmask %s up",
 			  IFCONFIG_PATH,
 			  actual,
 			  ifconfig_local,
-			  create_arbitrary_remote( tt, &gc ),
+			  print_in_addr_t (remote_end, 0, &gc),
 			  tun_mtu,
 			  ifconfig_remote_netmask
 			  );
@@ -1168,7 +1190,7 @@ do_ifconfig (struct tuntap *tt,
           r.flags = RT_DEFINED;
           r.network = tt->local & tt->remote_netmask;
           r.netmask = tt->remote_netmask;
-          r.gateway = tt->local;
+          r.gateway = remote_end;
           add_route (&r, tt, 0, NULL, es);
         }
 
@@ -1228,19 +1250,23 @@ do_ifconfig (struct tuntap *tt,
     if ( do_ipv6 )
       {
 	char * saved_actual;
+	char iface[64];
+	DWORD idx;
 
 	if (!strcmp (actual, "NULL"))
 	  msg (M_FATAL, "Error: When using --tun-ipv6, if you have more than one TAP-Windows adapter, you must also specify --dev-node");
 
-	/* example: netsh interface ipv6 set address MyTap 2001:608:8003::d store=active */
+	idx = get_adapter_index_flexible(actual);
+	openvpn_snprintf(iface, sizeof(iface), "interface=%lu", idx);
+
+	/* example: netsh interface ipv6 set address interface=42 2001:608:8003::d store=active */
 	argv_printf (&argv,
-		    "%s%sc interface ipv6 set address %s %s store=active",
+		     "%s%sc interface ipv6 set address %s %s store=active",
 		     get_win_sys_path(),
 		     NETSH_PATH_SUFFIX,
-		     actual,
-		     ifconfig_ipv6_local );
-
-	netsh_command (&argv, 4);
+		     win32_version_info() == WIN_XP ? actual : iface,
+		     ifconfig_ipv6_local);
+	netsh_command (&argv, 4, M_FATAL);
 
 	/* explicit route needed */
 	/* on windows, OpenVPN does ifconfig first, open_tun later, so
@@ -1249,6 +1275,8 @@ do_ifconfig (struct tuntap *tt,
 	 */
 	saved_actual = tt->actual_name;
 	tt->actual_name = (char*) actual;
+	/* we use adapter_index in add_route_ipv6 */
+	tt->adapter_index = idx;
 	add_route_connected_v6_net(tt, es);
 	tt->actual_name = saved_actual;
       }
@@ -1321,12 +1349,12 @@ write_tun_header (struct tuntap* tt, uint8_t *buf, int len)
       {
         u_int32_t type;
         struct iovec iv[2];
-        struct ip *iph;
+        struct openvpn_iphdr *iph;
 
-        iph = (struct ip *) buf;
+        iph = (struct openvpn_iphdr *) buf;
 
-        if (tt->ipv6 && iph->ip_v == 6)
-            type = htonl (AF_INET6);
+        if (tt->ipv6 && OPENVPN_IPH_GET_VER(iph->version_len) == 6)
+            type = htonl(AF_INET6);
         else
             type = htonl (AF_INET);
 
@@ -2389,7 +2417,6 @@ close_tun (struct tuntap *tt)
     }
   else if (tt)				/* close and destroy */
     {
-      struct gc_arena gc = gc_new ();
       struct argv argv;
 
       /* setup command, close tun dev (clears tt->actual_name!), run command
@@ -2619,9 +2646,9 @@ open_darwin_utun (const char *dev, const char *dev_type, const char *dev_node, s
 
   /* dev_node is simply utun, do the normal dynamic utun
    * otherwise try to parse the utun number */
-  if (dev_node && !strcmp ("utun", dev_node)==0)
+  if (dev_node && (strcmp("utun", dev_node) != 0 ))
     {
-      if (!sscanf (dev_node, "utun%d", &utunnum)==1)
+      if (sscanf(dev_node, "utun%d", &utunnum) != 1 )
         msg (M_FATAL, "Cannot parse 'dev-node %s' please use 'dev-node utunX'"
              "to use a utun device number X", dev_node);
     }
@@ -4239,7 +4266,7 @@ dhcp_renew (const struct tuntap *tt)
  */
 
 static void
-netsh_command (const struct argv *a, int n)
+netsh_command (const struct argv *a, int n, int msglevel)
 {
   int i;
   for (i = 0; i < n; ++i)
@@ -4254,7 +4281,7 @@ netsh_command (const struct argv *a, int n)
 	return;
       openvpn_sleep (4);
     }
-  msg (M_FATAL, "NETSH: command failed");
+  msg (msglevel, "NETSH: command failed");
 }
 
 void
@@ -4404,7 +4431,7 @@ netsh_ifconfig_options (const char *type,
 		   NETSH_PATH_SUFFIX,
 		   type,
 		   flex_name);
-      netsh_command (&argv, 2);
+      netsh_command (&argv, 2, M_FATAL);
     }
 
   /* add new DNS/WINS settings to TAP interface */
@@ -4425,7 +4452,7 @@ netsh_ifconfig_options (const char *type,
 			 type,
 			 flex_name,
 			 print_in_addr_t (addr_list[i], 0, &gc));
-	    netsh_command (&argv, 2);
+	    netsh_command (&argv, 2, M_FATAL);
 	  
 	    ++count;
 	  }
@@ -4500,7 +4527,7 @@ netsh_ifconfig (const struct tuntap_options *to,
 		       print_in_addr_t (ip, 0, &gc),
 		       print_in_addr_t (netmask, 0, &gc));
 
-	  netsh_command (&argv, 4);
+	  netsh_command (&argv, 4, M_FATAL);
 	}
     }
 
@@ -4546,7 +4573,7 @@ netsh_enable_dhcp (const struct tuntap_options *to,
 	       NETSH_PATH_SUFFIX,
 	       actual_name);
 
-  netsh_command (&argv, 4);
+  netsh_command (&argv, 4, M_FATAL);
 
   argv_reset (&argv);
 }
@@ -5262,7 +5289,7 @@ close_tun (struct tuntap *tt)
 		     tt->actual_name,
 		     ifconfig_ipv6_local );
 
-	  netsh_command (&argv, 1);
+	  netsh_command (&argv, 1, M_WARN);
           argv_reset (&argv);
 	}
 #if 1

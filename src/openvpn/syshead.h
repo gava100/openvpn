@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -47,6 +47,7 @@
 
 #ifdef _MSC_VER // Visual Studio
 #define __func__ __FUNCTION__
+#define __attribute__(x)
 #endif
 
 #if defined(__APPLE__)
@@ -285,6 +286,10 @@
 
 #ifdef HAVE_NETINET_IP_H
 #include <netinet/ip.h>
+#endif
+
+#ifdef HAVE_NETINET_TCP_H
+#include <netinet/tcp.h>
 #endif
 
 #ifdef HAVE_NET_IF_TUN_H

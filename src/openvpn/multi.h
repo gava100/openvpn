@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -571,11 +571,6 @@ static inline void
 multi_set_pending (struct multi_context *m, struct multi_instance *mi)
 {
   m->pending = mi;
-}
-
-static inline void
-multi_release_io_lock (struct multi_context *m)
-{
 }
 
 #endif /* P2MP_SERVER */

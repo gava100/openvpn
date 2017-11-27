@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -133,13 +133,15 @@ struct context_persist
  *
  * Level 0 state is initialized once at program startup, and then remains
  * throughout the lifetime of the OpenVPN process.  This structure
- * contains information related to the process's PID, user, and group.
+ * contains information related to the process's PID, user, group, and
+ * privileges.
  */
 struct context_0
 {
   /* workspace for --user/--group */
   bool uid_gid_specified;
-  bool uid_gid_set;
+  /* helper which tells us whether we should keep trying to drop privileges */
+  bool uid_gid_chroot_set;
   struct platform_state_user platform_state_user;
   struct platform_state_group platform_state_group;
 };

@@ -5,8 +5,8 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
- *  Copyright (C) 2010 Fox Crypto B.V. <openvpn@fox-it.com>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2010-2017 Fox Crypto B.V. <openvpn@fox-it.com>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -619,7 +619,7 @@ verify_cert(struct tls_session *session, openvpn_x509_cert_t *cert, int cert_dep
   string_replace_leading (subject, '-', '_');
 
   /* extract the username (default is CN) */
-  if (SUCCESS != x509_get_username (common_name, sizeof(common_name),
+  if (SUCCESS != backend_x509_get_username (common_name, sizeof(common_name),
       opt->x509_username_field, cert))
     {
       if (!cert_depth)

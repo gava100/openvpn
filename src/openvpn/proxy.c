@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -94,7 +94,7 @@ recv_line (socket_descriptor_t sd,
 	}
 
       FD_ZERO (&reads);
-      FD_SET (sd, &reads);
+      openvpn_fd_set (sd, &reads);
       tv.tv_sec = timeout_sec;
       tv.tv_usec = 0;
 
@@ -289,6 +289,7 @@ get_proxy_authenticate (socket_descriptor_t sd,
     {
       if (!recv_line (sd, buf, sizeof (buf), timeout, true, NULL, signal_received))
 	{
+	  free(*data);
 	  *data = NULL;
 	  return HTTP_AUTH_NONE;
 	}
@@ -724,6 +725,12 @@ establish_http_proxy_passthru (struct http_proxy_info *p,
 	      const char *algor = get_pa_var("algorithm", pa, &gc);
 	      const char *opaque = get_pa_var("opaque", pa, &gc);
 
+	      if ( !realm || !nonce )
+		{
+		  msg(D_LINK_ERRORS, "HTTP proxy: digest auth failed, malformed response from server: realm= or nonce= missing" );
+		  goto error;
+		}
+
 	      /* generate a client nonce */
 	      ASSERT(rand_bytes(cnonce_raw, sizeof(cnonce_raw)));
 	      cnonce = make_base64_string2(cnonce_raw, sizeof(cnonce_raw), &gc);
@@ -830,6 +837,7 @@ establish_http_proxy_passthru (struct http_proxy_info *p,
 	      if (p->options.auth_retry == PAR_NCT && method == HTTP_AUTH_BASIC)
 		{
 		  msg (D_PROXY, "HTTP proxy: support for basic auth and other cleartext proxy auth methods is disabled");
+		  free(pa);
 		  goto error;
 		}
 	      p->auth_method = method;

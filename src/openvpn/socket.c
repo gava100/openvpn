@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -494,12 +494,9 @@ static void
 socket_set_sndbuf (int sd, int size)
 {
 #if defined(HAVE_SETSOCKOPT) && defined(SOL_SOCKET) && defined(SO_SNDBUF)
-  if (size > 0 && size < SOCKET_SND_RCV_BUF_MAX)
+  if (setsockopt (sd, SOL_SOCKET, SO_SNDBUF, (void *) &size, sizeof (size)) != 0)
     {
-      if (setsockopt (sd, SOL_SOCKET, SO_SNDBUF, (void *) &size, sizeof (size)) != 0)
-	{
-	  msg (M_WARN, "NOTE: setsockopt SO_SNDBUF=%d failed", size);
-	}
+      msg (M_WARN, "NOTE: setsockopt SO_SNDBUF=%d failed", size);
     }
 #endif
 }
@@ -523,13 +520,10 @@ static bool
 socket_set_rcvbuf (int sd, int size)
 {
 #if defined(HAVE_SETSOCKOPT) && defined(SOL_SOCKET) && defined(SO_RCVBUF)
-  if (size > 0 && size < SOCKET_SND_RCV_BUF_MAX)
+  if (setsockopt (sd, SOL_SOCKET, SO_RCVBUF, (void *) &size, sizeof (size)) != 0)
     {
-      if (setsockopt (sd, SOL_SOCKET, SO_RCVBUF, (void *) &size, sizeof (size)) != 0)
-	{
-	  msg (M_WARN, "NOTE: setsockopt SO_RCVBUF=%d failed", size);
-	  return false;
-	}
+      msg (M_WARN, "NOTE: setsockopt SO_RCVBUF=%d failed", size);
+      return false;
     }
   return true;
 #endif
@@ -848,7 +842,7 @@ socket_listen_accept (socket_descriptor_t sd,
       struct timeval tv;
 
       FD_ZERO (&reads);
-      FD_SET (sd, &reads);
+      openvpn_fd_set (sd, &reads);
       tv.tv_sec = 0;
       tv.tv_usec = 0;
 
@@ -940,16 +934,22 @@ openvpn_connect (socket_descriptor_t sd,
     {
       while (true)
 	{
+#if POLL
+	  struct pollfd fds[1];
+	  fds[0].fd = sd;
+	  fds[0].events = POLLOUT;
+	  status = poll(fds, 1, 0);
+#else
 	  fd_set writes;
 	  struct timeval tv;
 
 	  FD_ZERO (&writes);
-	  FD_SET (sd, &writes);
+	  openvpn_fd_set (sd, &writes);
 	  tv.tv_sec = 0;
 	  tv.tv_usec = 0;
 
 	  status = select (sd + 1, NULL, &writes, NULL, &tv);
-
+#endif
 	  if (signal_received)
 	    {
 	      get_signal (signal_received);
@@ -968,7 +968,11 @@ openvpn_connect (socket_descriptor_t sd,
 	    {
 	      if (--connect_timeout < 0)
 		{
+#ifdef WIN32
+		  status = WSAETIMEDOUT;
+#else
 		  status = ETIMEDOUT;
+#endif
 		  break;
 		}
 	      openvpn_sleep (1);
@@ -1265,20 +1269,24 @@ resolve_remote (struct link_socket *sock,
 		  ASSERT (0);
 		}
 
-		  /* Temporary fix, this need to be changed for dual stack */
-		  status = openvpn_getaddrinfo(flags, sock->remote_host, retry,
-											  signal_received, af, &ai);
-		  if(status == 0) {
-			  sock->info.lsa->remote.addr.in6 = *((struct sockaddr_in6*)(ai->ai_addr));
-			  freeaddrinfo(ai);
+	      /* Temporary fix, this need to be changed for dual stack */
+	      status = openvpn_getaddrinfo(flags, sock->remote_host, retry,
+					    signal_received, af, &ai);
+	      if(status == 0)
+		{
+		  if ( ai->ai_family == AF_INET6 )
+		    sock->info.lsa->remote.addr.in6 = *((struct sockaddr_in6*)(ai->ai_addr));
+		  else
+		    sock->info.lsa->remote.addr.in4 = *((struct sockaddr_in*)(ai->ai_addr));
+		  freeaddrinfo(ai);
 
-			  dmsg (D_SOCKET_DEBUG, "RESOLVE_REMOTE flags=0x%04x phase=%d rrs=%d sig=%d status=%d",
+		  dmsg (D_SOCKET_DEBUG, "RESOLVE_REMOTE flags=0x%04x phase=%d rrs=%d sig=%d status=%d",
 					flags,
 					phase,
 					retry,
 					signal_received ? *signal_received : -1,
 					status);
-		  }
+		}
 	      if (signal_received)
 		{
 		  if (*signal_received)
@@ -2412,6 +2420,22 @@ setenv_in_addr_t (struct env_set *es, const char *name_prefix, in_addr_t addr, c
 }
 
 void
+setenv_in6_addr (struct env_set *es,
+                 const char *name_prefix,
+                 const struct in6_addr *addr,
+                 const unsigned int flags)
+{
+  if (!IN6_IS_ADDR_UNSPECIFIED (addr) || !(flags & SA_SET_IF_NONZERO))
+    {
+      struct openvpn_sockaddr si;
+      CLEAR (si);
+      si.addr.in6.sin6_family = AF_INET6;
+      si.addr.in6.sin6_addr = *addr;
+      setenv_sockaddr (es, name_prefix, &si, flags);
+    }
+}
+
+void
 setenv_link_socket_actual (struct env_set *es,
 			   const char *name_prefix,
 			   const struct link_socket_actual *act,
@@ -2648,47 +2672,35 @@ link_socket_read_tcp (struct link_socket *sock,
 
 #if ENABLE_IP_PKTINFO
 
-#pragma pack(1) /* needed to keep structure size consistent for 32 vs. 64-bit architectures */
-struct openvpn_in4_pktinfo
-{
-  struct cmsghdr cmsghdr;
-#ifdef HAVE_IN_PKTINFO
-  struct in_pktinfo pi4;
-#elif defined(IP_RECVDSTADDR)
-  struct in_addr pi4;
+/* make the buffer large enough to handle ancilliary socket data for
+ * both IPv4 and IPv6 destination addresses, plus padding (see RFC 2292)
+ */
+#if defined(HAVE_IN_PKTINFO) && defined(HAVE_IPI_SPEC_DST)
+#define PKTINFO_BUF_SIZE max_int( CMSG_SPACE(sizeof (struct in6_pktinfo)), \
+				  CMSG_SPACE(sizeof (struct in_pktinfo)) )
+#else
+#define PKTINFO_BUF_SIZE max_int( CMSG_SPACE(sizeof (struct in6_pktinfo)), \
+				  CMSG_SPACE(sizeof (struct in_addr)) )
 #endif
-};
-struct openvpn_in6_pktinfo
-{
-  struct cmsghdr cmsghdr;
-  struct in6_pktinfo pi6;
-};
-
-union openvpn_pktinfo {
-	struct openvpn_in4_pktinfo msgpi4;
-	struct openvpn_in6_pktinfo msgpi6;
-};
-#pragma pack()
 
 static socklen_t
 link_socket_read_udp_posix_recvmsg (struct link_socket *sock,
 				    struct buffer *buf,
-				    int maxsize,
 				    struct link_socket_actual *from)
 {
   struct iovec iov;
-  union openvpn_pktinfo opi;
+  uint8_t pktinfo_buf[PKTINFO_BUF_SIZE];
   struct msghdr mesg;
   socklen_t fromlen = sizeof (from->dest.addr);
 
   iov.iov_base = BPTR (buf);
-  iov.iov_len = maxsize;
+  iov.iov_len = buf_forward_capacity_total (buf);
   mesg.msg_iov = &iov;
   mesg.msg_iovlen = 1;
   mesg.msg_name = &from->dest.addr;
   mesg.msg_namelen = fromlen;
-  mesg.msg_control = &opi;
-  mesg.msg_controllen = sizeof opi;
+  mesg.msg_control = pktinfo_buf;
+  mesg.msg_controllen = sizeof pktinfo_buf;
   buf->len = recvmsg (sock->sd, &mesg, 0);
   if (buf->len >= 0)
     {
@@ -2700,13 +2712,14 @@ link_socket_read_udp_posix_recvmsg (struct link_socket *sock,
 #ifdef IP_PKTINFO
 	  && cmsg->cmsg_level == SOL_IP 
 	  && cmsg->cmsg_type == IP_PKTINFO
+	  && cmsg->cmsg_len >= CMSG_LEN(sizeof(struct in_pktinfo)) )
 #elif defined(IP_RECVDSTADDR)
 	  && cmsg->cmsg_level == IPPROTO_IP
 	  && cmsg->cmsg_type == IP_RECVDSTADDR
+	  && cmsg->cmsg_len >= CMSG_LEN(sizeof(struct in_addr)) )
 #else
 #error ENABLE_IP_PKTINFO is set without IP_PKTINFO xor IP_RECVDSTADDR (fix syshead.h)
 #endif
-	  && cmsg->cmsg_len >= sizeof (struct openvpn_in4_pktinfo))
 	{
 #ifdef IP_PKTINFO
 	  struct in_pktinfo *pkti = (struct in_pktinfo *) CMSG_DATA (cmsg);
@@ -2722,7 +2735,7 @@ link_socket_read_udp_posix_recvmsg (struct link_socket *sock,
 	  && CMSG_NXTHDR (&mesg, cmsg) == NULL
 	  && cmsg->cmsg_level == IPPROTO_IPV6 
 	  && cmsg->cmsg_type == IPV6_PKTINFO
-	  && cmsg->cmsg_len >= sizeof (struct openvpn_in6_pktinfo))
+	  && cmsg->cmsg_len >= CMSG_LEN(sizeof(struct in6_pktinfo)) )
 	{
 	  struct in6_pktinfo *pkti6 = (struct in6_pktinfo *) CMSG_DATA (cmsg);
 	  from->pi.in6.ipi6_ifindex = pkti6->ipi6_ifindex;
@@ -2736,20 +2749,18 @@ link_socket_read_udp_posix_recvmsg (struct link_socket *sock,
 int
 link_socket_read_udp_posix (struct link_socket *sock,
 			    struct buffer *buf,
-			    int maxsize,
 			    struct link_socket_actual *from)
 {
   socklen_t fromlen = sizeof (from->dest.addr);
   socklen_t expectedlen = af_addr_size(proto_sa_family(sock->info.proto));
   addr_zero_host(&from->dest);
-  ASSERT (buf_safe (buf, maxsize));
 #if ENABLE_IP_PKTINFO
   /* Both PROTO_UDPv4 and PROTO_UDPv6 */
   if (proto_is_udp(sock->info.proto) && sock->sockflags & SF_USE_IP_PKTINFO)
-    fromlen = link_socket_read_udp_posix_recvmsg (sock, buf, maxsize, from);
+    fromlen = link_socket_read_udp_posix_recvmsg (sock, buf, from);
   else
 #endif
-    buf->len = recvfrom (sock->sd, BPTR (buf), maxsize, 0,
+    buf->len = recvfrom (sock->sd, BPTR (buf), buf_forward_capacity(buf), 0,
 			 &from->dest.addr.sa, &fromlen);
   if (buf->len >= 0 && expectedlen && fromlen != expectedlen)
     bad_address_length (fromlen, expectedlen);
@@ -2789,7 +2800,7 @@ link_socket_write_udp_posix_sendmsg (struct link_socket *sock,
   struct iovec iov;
   struct msghdr mesg;
   struct cmsghdr *cmsg;
-  union openvpn_pktinfo opi;
+  uint8_t pktinfo_buf[PKTINFO_BUF_SIZE];
 
   iov.iov_base = BPTR (buf);
   iov.iov_len = BLEN (buf);
@@ -2801,12 +2812,12 @@ link_socket_write_udp_posix_sendmsg (struct link_socket *sock,
       {
         mesg.msg_name = &to->dest.addr.sa;
         mesg.msg_namelen = sizeof (struct sockaddr_in);
-        mesg.msg_control = &opi;
+        mesg.msg_control = pktinfo_buf;
         mesg.msg_flags = 0;
 #ifdef HAVE_IN_PKTINFO
-        mesg.msg_controllen = sizeof (struct openvpn_in4_pktinfo);
+        mesg.msg_controllen = CMSG_SPACE(sizeof (struct in_pktinfo));
         cmsg = CMSG_FIRSTHDR (&mesg);
-        cmsg->cmsg_len = sizeof (struct openvpn_in4_pktinfo);
+        cmsg->cmsg_len = CMSG_LEN(sizeof (struct in_pktinfo));
         cmsg->cmsg_level = SOL_IP;
         cmsg->cmsg_type = IP_PKTINFO;
 	{
@@ -2817,7 +2828,7 @@ link_socket_write_udp_posix_sendmsg (struct link_socket *sock,
         pkti->ipi_addr.s_addr = 0;
 	}
 #elif defined(IP_RECVDSTADDR)
-	ASSERT( CMSG_SPACE(sizeof (struct in_addr)) <= sizeof(opi) );
+	ASSERT( CMSG_SPACE(sizeof (struct in_addr)) <= sizeof(pktinfo_buf) );
         mesg.msg_controllen = CMSG_SPACE(sizeof (struct in_addr));
         cmsg = CMSG_FIRSTHDR (&mesg);
         cmsg->cmsg_len = CMSG_LEN(sizeof(struct in_addr));
@@ -2834,13 +2845,16 @@ link_socket_write_udp_posix_sendmsg (struct link_socket *sock,
         struct in6_pktinfo *pkti6;
         mesg.msg_name = &to->dest.addr.sa;
         mesg.msg_namelen = sizeof (struct sockaddr_in6);
-        mesg.msg_control = &opi;
-        mesg.msg_controllen = sizeof (struct openvpn_in6_pktinfo);
+
+        ASSERT( CMSG_SPACE(sizeof (struct in6_pktinfo)) <= sizeof(pktinfo_buf) );
+        mesg.msg_control = pktinfo_buf;
+        mesg.msg_controllen = CMSG_SPACE(sizeof (struct in6_pktinfo));
         mesg.msg_flags = 0;
         cmsg = CMSG_FIRSTHDR (&mesg);
-        cmsg->cmsg_len = sizeof (struct openvpn_in6_pktinfo);
+        cmsg->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
         cmsg->cmsg_level = IPPROTO_IPV6;
         cmsg->cmsg_type = IPV6_PKTINFO;
+
         pkti6 = (struct in6_pktinfo *) CMSG_DATA (cmsg);
         pkti6->ipi6_ifindex = to->pi.in6.ipi6_ifindex;
         pkti6->ipi6_addr = to->pi.in6.ipi6_addr;

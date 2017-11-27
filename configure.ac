@@ -4,7 +4,7 @@ dnl             session authentication and key exchange,
 dnl             packet encryption, packet authentication, and
 dnl             packet compression.
 dnl
-dnl  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+dnl  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
 dnl  Copyright (C) 2006-2012 Alon Bar-Lev <alon.barlev@gmail.com>
 dnl
 dnl  This program is free software; you can redistribute it and/or modify
@@ -177,13 +177,6 @@ AC_ARG_ENABLE(
 	[AS_HELP_STRING([--enable-small], [enable smaller executable size (disable OCC, usage message, and verb 4 parm list) @<:@default=no@:>@])],
 	,
 	[enable_small="no"]
-)
-
-AC_ARG_ENABLE(
-	[password-save],
-	[AS_HELP_STRING([--enable-password-save], [allow --askpass and --auth-user-pass passwords to be read from a file @<:@default=no@:>@])],
-	,
-	[enable_password_save="no"]
 )
 
 AC_ARG_ENABLE(
@@ -430,6 +423,7 @@ AC_CHECK_HEADERS([ \
 	netinet/in.h netinet/in_systm.h \
 	netinet/tcp.h arpa/inet.h netdb.h \
 	windows.h winsock2.h ws2tcpip.h \
+	versionhelpers.h \
 ])
 AC_CHECK_HEADERS([ \
 	sys/time.h sys/ioctl.h sys/stat.h \
@@ -832,13 +826,13 @@ if test "${with_crypto_library}" = "polarssl" ; then
 #include <polarssl/version.h>
 			]],
 			[[
-#if POLARSSL_VERSION_NUMBER < 0x01020A00 || POLARSSL_VERSION_NUMBER >= 0x01030000
+#if POLARSSL_VERSION_NUMBER < 0x01030800 || POLARSSL_VERSION_NUMBER >= 0x01040000
 #error invalid version
 #endif
 			]]
 		)],
 		[AC_MSG_RESULT([ok])],
-		[AC_MSG_ERROR([PolarSSL 1.2.x required and must be 1.2.10 or later])]
+		[AC_MSG_ERROR([PolarSSL 1.3.x required and must be 1.3.8 or later])]
 	)
 
 	polarssl_with_pkcs11="no"
@@ -977,7 +971,6 @@ test "${enable_port_share}" = "yes" && AC_DEFINE([ENABLE_PORT_SHARE], [1], [Enab
 test "${enable_def_auth}" = "yes" && AC_DEFINE([ENABLE_DEF_AUTH], [1], [Enable deferred authentication])
 test "${enable_pf}" = "yes" && AC_DEFINE([ENABLE_PF], [1], [Enable internal packet filter])
 test "${enable_strict_options}" = "yes" && AC_DEFINE([ENABLE_STRICT_OPTIONS_CHECK], [1], [Enable strict options check between peers])
-test "${enable_password_save}" = "yes" && AC_DEFINE([ENABLE_PASSWORD_SAVE], [1], [Allow --askpass and --auth-user-pass passwords to be read from a file])
 
 case "${with_crypto_library}" in
 	openssl)
@@ -1066,6 +1059,12 @@ if test "${enable_pkcs11}" = "yes"; then
 	)
 fi
 
+# Set -std=gnu89 unless user already specified a -std=
+case "${CFLAGS}" in
+  *-std=*) ;;
+  *)       CFLAGS="${CFLAGS} -std=gnu89" ;;
+esac
+
 if test "${enable_pedantic}" = "yes"; then
 	enable_strict="yes"
 	CFLAGS="${CFLAGS} -pedantic"
@@ -1120,11 +1119,41 @@ AM_CONDITIONAL([WIN32], [test "${WIN32}" = "yes"])
 AM_CONDITIONAL([GIT_CHECKOUT], [test "${GIT_CHECKOUT}" = "yes"])
 AM_CONDITIONAL([ENABLE_PLUGIN_AUTH_PAM], [test "${enable_plugin_auth_pam}" = "yes"])
 AM_CONDITIONAL([ENABLE_PLUGIN_DOWN_ROOT], [test "${enable_plugin_down_root}" = "yes"])
+AM_CONDITIONAL([ENABLE_CRYPTO], [test "${enable_crypto}" = "yes"])
 
 plugindir="${with_plugindir}"
 sampledir="\$(docdir)/sample"
 AC_SUBST([plugindir])
 AC_SUBST([sampledir])
+
+VENDOR_SRC_ROOT="\$(abs_top_srcdir)/vendor/"
+VENDOR_DIST_ROOT="\$(abs_top_builddir)/vendor/dist"
+VENDOR_BUILD_ROOT="\$(abs_top_builddir)/vendor/.build"
+AC_SUBST([VENDOR_SRC_ROOT])
+AC_SUBST([VENDOR_BUILD_ROOT])
+AC_SUBST([VENDOR_DIST_ROOT])
+
+TEST_LDFLAGS="-lcmocka -L\$(abs_top_builddir)/vendor/dist/lib -Wl,-rpath,\$(abs_top_builddir)/vendor/dist/lib"
+TEST_CFLAGS="-I\$(top_srcdir)/include -I\$(abs_top_builddir)/vendor/dist/include"
+
+AC_SUBST([TEST_LDFLAGS])
+AC_SUBST([TEST_CFLAGS])
+
+# Check if cmake is available and cmocka git submodule is initialized,
+# needed for unit testing
+AC_CHECK_PROGS([CMAKE], [cmake])
+if test -n "${CMAKE}"; then
+   if test -f "${srcdir}/vendor/cmocka/CMakeLists.txt"; then
+      AM_CONDITIONAL([CMOCKA_INITIALIZED], [true])
+   else
+      AM_CONDITIONAL([CMOCKA_INITIALIZED], [false])
+      AC_MSG_RESULT([!! WARNING !! The cmoka git submodule has not been initialized or updated.  Unit testing cannot be performed.])
+   fi
+else
+   AC_MSG_RESULT([!! WARNING !! CMake is NOT available.  Unit testing cannot be performed.])
+   AM_CONDITIONAL([CMOCKA_INITIALIZED], [false])
+fi
+
 
 AC_CONFIG_FILES([
 	version.sh
@@ -1144,6 +1173,12 @@ AC_CONFIG_FILES([
 	src/plugins/auth-pam/Makefile
 	src/plugins/down-root/Makefile
 	tests/Makefile
+        tests/unit_tests/Makefile
+        tests/unit_tests/openvpn/Makefile
+        tests/unit_tests/plugins/Makefile
+        tests/unit_tests/plugins/auth-pam/Makefile
+        tests/unit_tests/example_test/Makefile
+        vendor/Makefile
 	sample/Makefile
 	doc/Makefile
 ])

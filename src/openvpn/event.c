@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -873,18 +873,18 @@ se_ctl (struct event_set *es, event_t event, unsigned int rwflags, void *arg)
       if (ses->fast)
 	{
 	  if (rwflags & EVENT_READ)
-	    FD_SET (event, &ses->readfds);
+	    openvpn_fd_set (event, &ses->readfds);
 	  if (rwflags & EVENT_WRITE)
-	    FD_SET (event, &ses->writefds);
+	    openvpn_fd_set (event, &ses->writefds);
 	}
       else
 	{
 	  if (rwflags & EVENT_READ)
-	    FD_SET (event, &ses->readfds);
+	    openvpn_fd_set (event, &ses->readfds);
 	  else
 	    FD_CLR (event, &ses->readfds);
 	  if (rwflags & EVENT_WRITE)
-	    FD_SET (event, &ses->writefds);
+	    openvpn_fd_set (event, &ses->writefds);
 	  else
 	    FD_CLR (event, &ses->writefds);
 	}

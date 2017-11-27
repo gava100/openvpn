@@ -5,8 +5,8 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
- *  Copyright (C) 2010 Fox Crypto B.V. <openvpn@fox-it.com>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2010-2017 Fox Crypto B.V. <openvpn@fox-it.com>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -93,14 +93,30 @@ cleanup:
 }
 
 #ifdef ENABLE_X509ALTUSERNAME
+bool
+x509_username_field_ext_supported(const char *fieldname)
+{
+  int nid = OBJ_txt2nid(fieldname);
+  return nid == NID_subject_alt_name || nid == NID_issuer_alt_name;
+}
+
 static
 bool extract_x509_extension(X509 *cert, char *fieldname, char *out, int size)
 {
   bool retval = false;
   char *buf = 0;
   GENERAL_NAMES *extensions;
-  int nid = OBJ_txt2nid(fieldname);
+  int nid;
 
+  if (!x509_username_field_ext_supported(fieldname))
+    {
+      msg(D_TLS_ERRORS,
+          "ERROR: --x509-alt-username field 'ext:%s' not supported",
+          fieldname);
+      return false;
+    }
+
+  nid = OBJ_txt2nid(fieldname);
   extensions = (GENERAL_NAMES *)X509_get_ext_d2i(cert, nid, NULL, NULL);
   if ( extensions )
     {
@@ -122,7 +138,10 @@ bool extract_x509_extension(X509 *cert, char *fieldname, char *out, int size)
           switch (name->type)
             {
               case GEN_EMAIL:
-                ASN1_STRING_to_UTF8((unsigned char**)&buf, name->d.ia5);
+                if (ASN1_STRING_to_UTF8((unsigned char **)&buf, name->d.ia5) < 0)
+                  {
+                    continue;
+                  }
                 if ( strlen (buf) != name->d.ia5->length )
                   {
                     msg (D_TLS_ERRORS, "ASN1 ERROR: string contained terminating zero");
@@ -139,7 +158,7 @@ bool extract_x509_extension(X509 *cert, char *fieldname, char *out, int size)
                 break;
             }
           }
-        sk_GENERAL_NAME_free (extensions);
+        GENERAL_NAMES_free(extensions);
     }
   return retval;
 }
@@ -186,8 +205,7 @@ extract_x509_field_ssl (X509_NAME *x509, const char *field_name, char *out,
   asn1 = X509_NAME_ENTRY_get_data(x509ne);
   if (!asn1)
     return FAILURE;
-  tmp = ASN1_STRING_to_UTF8(&buf, asn1);
-  if (tmp <= 0)
+  if (ASN1_STRING_to_UTF8(&buf, asn1) < 0)
     return FAILURE;
 
   strncpynt(out, (char *)buf, size);
@@ -200,7 +218,7 @@ extract_x509_field_ssl (X509_NAME *x509, const char *field_name, char *out,
 }
 
 result_t
-x509_get_username (char *common_name, int cn_len,
+backend_x509_get_username (char *common_name, int cn_len,
     char * x509_username_field, X509 *peer_cert)
 {
 #ifdef ENABLE_X509ALTUSERNAME
@@ -285,11 +303,11 @@ x509_get_subject (X509 *cert, struct gc_arena *gc)
 
   BIO_get_mem_ptr (subject_bio, &subject_mem);
 
-  maxlen = subject_mem->length + 1;
-  subject = gc_malloc (maxlen, false, gc);
+  maxlen = subject_mem->length;
+  subject = gc_malloc (maxlen+1, false, gc);
 
   memcpy (subject, subject_mem->data, maxlen);
-  subject[maxlen - 1] = '\0';
+  subject[maxlen] = '\0';
 
 err:
   if (subject_bio)
@@ -359,7 +377,7 @@ x509_setenv_track (const struct x509_track *xt, struct env_set *es, const int de
 		  ASN1_STRING *val = X509_NAME_ENTRY_get_data (ent);
 		  unsigned char *buf;
 		  buf = (unsigned char *)1; /* bug in OpenSSL 0.9.6b ASN1_STRING_to_UTF8 requires this workaround */
-		  if (ASN1_STRING_to_UTF8 (&buf, val) > 0)
+		  if (ASN1_STRING_to_UTF8 (&buf, val) >= 0)
 		    {
 		      do_setenv_x509(es, xt->name, (char *)buf, depth);
 		      OPENSSL_free (buf);
@@ -435,7 +453,7 @@ x509_setenv (struct env_set *es, int cert_depth, openvpn_x509_cert_t *peer_cert)
       if (!objbuf)
 	continue;
       buf = (unsigned char *)1; /* bug in OpenSSL 0.9.6b ASN1_STRING_to_UTF8 requires this workaround */
-      if (ASN1_STRING_to_UTF8 (&buf, val) <= 0)
+      if (ASN1_STRING_to_UTF8 (&buf, val) < 0)
 	continue;
       name_expand_size = 64 + strlen (objbuf);
       name_expand = (char *) malloc (name_expand_size);
@@ -585,6 +603,8 @@ x509_verify_crl(const char *crl_file, X509 *peer_cert, const char *subject)
   BIO *in=NULL;
   int n,i;
   result_t retval = FAILURE;
+  struct gc_arena gc = gc_new();
+  char *serial;
 
   in = BIO_new_file (crl_file, "r");
 
@@ -609,7 +629,8 @@ x509_verify_crl(const char *crl_file, X509 *peer_cert, const char *subject)
   for (i = 0; i < n; i++) {
     revoked = (X509_REVOKED *)sk_X509_REVOKED_value(X509_CRL_get_REVOKED(crl), i);
     if (ASN1_INTEGER_cmp(revoked->serialNumber, X509_get_serialNumber(peer_cert)) == 0) {
-      msg (D_HANDSHAKE, "CRL CHECK FAILED: %s is REVOKED",subject);
+      serial = backend_x509_get_serial_hex(peer_cert, &gc);
+      msg (D_HANDSHAKE, "CRL CHECK FAILED: %s (serial %s) is REVOKED", subject, (serial ? serial : "NOT AVAILABLE"));
       goto end;
     }
   }
@@ -618,6 +639,7 @@ x509_verify_crl(const char *crl_file, X509 *peer_cert, const char *subject)
   msg (D_HANDSHAKE, "CRL CHECK OK: %s",subject);
 
 end:
+  gc_free(&gc);
   BIO_free(in);
   if (crl)
     X509_CRL_free (crl);

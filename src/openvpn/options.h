@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -594,10 +594,15 @@ struct options
   bool exit_event_initial_state;
   bool show_net_up;
   int route_method;
+  bool block_outside_dns;
 #endif
 
   bool use_peer_id;
   uint32_t peer_id;
+
+  /* Useful when packets sent by openvpn itself are not subject
+     to the routing tables that would move packets into the tunnel. */
+  bool allow_recursive_routing;
 };
 
 #define streq(x, y) (!strcmp((x), (y)))
@@ -690,6 +695,10 @@ void usage_small (void);
 
 void show_library_versions(const unsigned int flags);
 
+#ifdef WIN32
+void show_windows_version(const unsigned int flags);
+#endif
+
 void init_options (struct options *o, const bool init_gc);
 void uninit_options (struct options *o);
 
@@ -778,8 +787,7 @@ void options_string_import (struct options *options,
 			    struct env_set *es);
 
 bool get_ipv6_addr( const char * prefix_str, struct in6_addr *network,
-		    unsigned int * netbits, char ** printable_ipv6, 
-		    int msglevel );
+		    unsigned int * netbits, int msglevel );
 
 /*
  * inline functions

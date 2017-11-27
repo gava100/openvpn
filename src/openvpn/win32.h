@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -270,6 +270,23 @@ const char *win_get_tempdir();
 
 /* Convert a string from UTF-8 to UCS-2 */
 WCHAR *wide_string (const char* utf8, struct gc_arena *gc);
+
+bool win_wfp_init_funcs();
+bool win_wfp_block_dns(const NET_IFINDEX index);
+bool win_wfp_uninit();
+
+#define WIN_XP 0
+#define WIN_VISTA 1
+#define WIN_7 2
+#define WIN_8 3
+
+int win32_version_info();
+
+/*
+String representation of Windows version number and name, see
+https://msdn.microsoft.com/en-us/library/windows/desktop/ms724832(v=vs.85).aspx
+*/
+const char * win32_version_string(struct gc_arena *gc, bool add_name);
 
 #endif
 #endif

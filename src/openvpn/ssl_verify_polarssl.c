@@ -5,8 +5,8 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
- *  Copyright (C) 2010 Fox Crypto B.V. <openvpn@fox-it.com>
+ *  Copyright (C) 2002-2017 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2010-2017 Fox Crypto B.V. <openvpn@fox-it.com>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -38,14 +38,15 @@
 #if defined(ENABLE_SSL) && defined(ENABLE_CRYPTO_POLARSSL)
 
 #include "ssl_verify.h"
-#include <polarssl/error.h>
 #include <polarssl/bignum.h>
+#include <polarssl/error.h>
+#include <polarssl/oid.h>
 #include <polarssl/sha1.h>
 
 #define MAX_SUBJECT_LENGTH 256
 
 int
-verify_callback (void *session_obj, x509_cert *cert, int cert_depth,
+verify_callback (void *session_obj, x509_crt *cert, int cert_depth,
     int *flags)
 {
   struct tls_session *session = (struct tls_session *) session_obj;
@@ -90,8 +91,8 @@ verify_callback (void *session_obj, x509_cert *cert, int cert_depth,
 #endif
 
 result_t
-x509_get_username (char *cn, int cn_len,
-    char *x509_username_field, x509_cert *cert)
+backend_x509_get_username (char *cn, int cn_len,
+    char *x509_username_field, x509_crt *cert)
 {
   x509_name *name;
 
@@ -102,7 +103,7 @@ x509_get_username (char *cn, int cn_len,
   /* Find common name */
   while( name != NULL )
   {
-      if( memcmp( name->oid.p, OID_CN, OID_SIZE(OID_CN) ) == 0)
+      if( memcmp( name->oid.p, OID_AT_CN, OID_SIZE(OID_AT_CN) ) == 0)
 	break;
 
       name = name->next;
@@ -127,23 +128,16 @@ x509_get_username (char *cn, int cn_len,
 char *
 backend_x509_get_serial (openvpn_x509_cert_t *cert, struct gc_arena *gc)
 {
-  int ret = 0;
-  int i = 0;
   char *buf = NULL;
   size_t buflen = 0;
   mpi serial_mpi = { 0 };
-  int retval = 0;
 
   /* Transform asn1 integer serial into PolarSSL MPI */
   mpi_init(&serial_mpi);
-  retval = mpi_read_binary(&serial_mpi, cert->serial.p, cert->serial.len);
-  if (retval < 0)
+  if (!polar_ok(mpi_read_binary(&serial_mpi, cert->serial.p, cert->serial.len)))
     {
-      char errbuf[128];
-      error_strerror(retval, errbuf, sizeof(errbuf));
-
-      msg(M_WARN, "Failed to retrieve serial from certificate: %s.", errbuf);
-      return NULL;
+      msg(M_WARN, "Failed to retrieve serial from certificate.");
+      goto end;
     }
 
   /* Determine decimal representation length, allocate buffer */
@@ -151,16 +145,15 @@ backend_x509_get_serial (openvpn_x509_cert_t *cert, struct gc_arena *gc)
   buf = gc_malloc(buflen, true, gc);
 
   /* Write MPI serial as decimal string into buffer */
-  retval = mpi_write_string(&serial_mpi, 10, buf, &buflen);
-  if (retval < 0)
+  if (!polar_ok(mpi_write_string(&serial_mpi, 10, buf, &buflen)))
     {
-      char errbuf[128];
-      error_strerror(retval, errbuf, sizeof(errbuf));
-
-      msg(M_WARN, "Failed to write serial to string: %s.", errbuf);
-      return NULL;
+      msg(M_WARN, "Failed to write serial to string.");
+      buf = NULL;
+      goto end;
     }
 
+end:
+  mpi_free(&serial_mpi);
   return buf;
 }
 
@@ -172,14 +165,14 @@ backend_x509_get_serial_hex (openvpn_x509_cert_t *cert, struct gc_arena *gc)
 
   buf = gc_malloc(len, true, gc);
 
-  if(x509parse_serial_gets(buf, len-1, &cert->serial) < 0)
+  if(x509_serial_gets(buf, len-1, &cert->serial) < 0)
     buf = NULL;
 
   return buf;
 }
 
 unsigned char *
-x509_get_sha1_hash (x509_cert *cert, struct gc_arena *gc)
+x509_get_sha1_hash (x509_crt *cert, struct gc_arena *gc)
 {
   unsigned char *sha1_hash = gc_malloc(SHA_DIGEST_LENGTH, false, gc);
   sha1(cert->tbs.p, cert->tbs.len, sha1_hash);
@@ -187,14 +180,14 @@ x509_get_sha1_hash (x509_cert *cert, struct gc_arena *gc)
 }
 
 char *
-x509_get_subject(x509_cert *cert, struct gc_arena *gc)
+x509_get_subject(x509_crt *cert, struct gc_arena *gc)
 {
   char tmp_subject[MAX_SUBJECT_LENGTH] = {0};
   char *subject = NULL;
 
   int ret = 0;
 
-  ret = x509parse_dn_gets( tmp_subject, MAX_SUBJECT_LENGTH-1, &cert->subject );
+  ret = x509_dn_gets( tmp_subject, MAX_SUBJECT_LENGTH-1, &cert->subject );
   if (ret > 0)
     {
       /* Allocate the required space for the subject */
@@ -224,70 +217,28 @@ x509_setenv (struct env_set *es, int cert_depth, openvpn_x509_cert_t *cert)
   while( name != NULL )
     {
       char name_expand[64+8];
+      const char *shortname;
 
-      if( name->oid.len == 2 && memcmp( name->oid.p, OID_X520, 2 ) == 0 )
+      if( 0 == oid_get_attr_short_name(&name->oid, &shortname) )
 	{
-	  switch( name->oid.p[2] )
-	    {
-	    case X520_COMMON_NAME:
-		openvpn_snprintf (name_expand, sizeof(name_expand), "X509_%d_CN",
-		    cert_depth); break;
-
-	    case X520_COUNTRY:
-		openvpn_snprintf (name_expand, sizeof(name_expand), "X509_%d_C",
-		    cert_depth); break;
-
-	    case X520_LOCALITY:
-		openvpn_snprintf (name_expand, sizeof(name_expand), "X509_%d_L",
-		    cert_depth); break;
-
-	    case X520_STATE:
-		openvpn_snprintf (name_expand, sizeof(name_expand), "X509_%d_ST",
-		    cert_depth); break;
-
-	    case X520_ORGANIZATION:
-		openvpn_snprintf (name_expand, sizeof(name_expand), "X509_%d_O",
-		    cert_depth); break;
-
-	    case X520_ORG_UNIT:
-		openvpn_snprintf (name_expand, sizeof(name_expand), "X509_%d_OU",
-		    cert_depth); break;
-
-	    default:
-		openvpn_snprintf (name_expand, sizeof(name_expand),
-		    "X509_%d_0x%02X", cert_depth, name->oid.p[2]);
-		break;
-	    }
+	  openvpn_snprintf (name_expand, sizeof(name_expand), "X509_%d_%s",
+	      cert_depth, shortname);
 	}
-	else if( name->oid.len == 8 && memcmp( name->oid.p, OID_PKCS9, 8 ) == 0 )
-	  {
-	    switch( name->oid.p[8] )
-	      {
-		case PKCS9_EMAIL:
-		  openvpn_snprintf (name_expand, sizeof(name_expand),
-		      "X509_%d_emailAddress", cert_depth); break;
-
-		default:
-		  openvpn_snprintf (name_expand, sizeof(name_expand),
-		      "X509_%d_0x%02X", cert_depth, name->oid.p[8]);
-		  break;
-	      }
-	  }
-	else
-	  {
-	    openvpn_snprintf (name_expand, sizeof(name_expand), "X509_%d_\?\?",
-		cert_depth);
-	  }
-
-	for( i = 0; i < name->val.len; i++ )
+      else
 	{
-	    if( i >= (int) sizeof( s ) - 1 )
-		break;
+	  openvpn_snprintf (name_expand, sizeof(name_expand), "X509_%d_\?\?",
+	      cert_depth);
+	}
 
-	    c = name->val.p[i];
-	    if( c < 32 || c == 127 || ( c > 128 && c < 160 ) )
-		 s[i] = '?';
-	    else s[i] = c;
+      for( i = 0; i < name->val.len; i++ )
+	{
+	  if( i >= (int) sizeof( s ) - 1 )
+	      break;
+
+	  c = name->val.p[i];
+	  if( c < 32 || c == 127 || ( c > 128 && c < 160 ) )
+	       s[i] = '?';
+	  else s[i] = c;
 	}
 	s[i] = '\0';
 
@@ -301,7 +252,7 @@ x509_setenv (struct env_set *es, int cert_depth, openvpn_x509_cert_t *cert)
 }
 
 result_t
-x509_verify_ns_cert_type(const x509_cert *cert, const int usage)
+x509_verify_ns_cert_type(const x509_crt *cert, const int usage)
 {
   if (usage == NS_CERT_CHECK_NONE)
     return SUCCESS;
@@ -316,7 +267,7 @@ x509_verify_ns_cert_type(const x509_cert *cert, const int usage)
 }
 
 result_t
-x509_verify_cert_ku (x509_cert *cert, const unsigned * const expected_ku,
+x509_verify_cert_ku (x509_crt *cert, const unsigned * const expected_ku,
     int expected_len)
 {
   result_t fFound = FAILURE;
@@ -349,7 +300,7 @@ x509_verify_cert_ku (x509_cert *cert, const unsigned * const expected_ku,
 }
 
 result_t
-x509_verify_cert_eku (x509_cert *cert, const char * const expected_oid)
+x509_verify_cert_eku (x509_crt *cert, const char * const expected_oid)
 {
   result_t fFound = FAILURE;
 
@@ -368,8 +319,7 @@ x509_verify_cert_eku (x509_cert *cert, const char * const expected_oid)
 	  char oid_num_str[1024];
 	  const char *oid_str;
 
-	  oid_str = x509_oid_get_description(oid);
-	  if (oid_str != NULL)
+	  if (0 == oid_get_extended_key_usage( oid, &oid_str ))
 	    {
 	      msg (D_HANDSHAKE, "++ Certificate has EKU (str) %s, expects %s",
 		  oid_str, expected_oid);
@@ -380,7 +330,7 @@ x509_verify_cert_eku (x509_cert *cert, const char * const expected_oid)
 		}
 	    }
 
-	  if (0 < x509_oid_get_numeric_string( oid_num_str,
+	  if (0 < oid_get_numeric_string( oid_num_str,
 	      sizeof (oid_num_str), oid))
 	    {
 	      msg (D_HANDSHAKE, "++ Certificate has EKU (oid) %s, expects %s",
@@ -399,7 +349,7 @@ x509_verify_cert_eku (x509_cert *cert, const char * const expected_oid)
 }
 
 result_t
-x509_write_pem(FILE *peercert_file, x509_cert *peercert)
+x509_write_pem(FILE *peercert_file, x509_crt *peercert)
 {
     msg (M_WARN, "PolarSSL does not support writing peer certificate in PEM format");
     return FAILURE;
@@ -409,17 +359,16 @@ x509_write_pem(FILE *peercert_file, x509_cert *peercert)
  * check peer cert against CRL
  */
 result_t
-x509_verify_crl(const char *crl_file, x509_cert *cert, const char *subject)
+x509_verify_crl(const char *crl_file, x509_crt *cert, const char *subject)
 {
   result_t retval = FAILURE;
   x509_crl crl = {0};
+  struct gc_arena gc = gc_new();
+  char *serial;
 
-  int polar_retval = x509parse_crlfile(&crl, crl_file);
-  if (polar_retval != 0)
+  if (!polar_ok(x509_crl_parse_file(&crl, crl_file)))
     {
-      char errstr[128];
-      error_strerror(polar_retval, errstr, sizeof(errstr));
-      msg (M_WARN, "CRL: cannot read CRL from file %s (%s)", crl_file, errstr);
+      msg (M_WARN, "CRL: cannot read CRL from file %s", crl_file);
       goto end;
     }
 
@@ -432,9 +381,10 @@ x509_verify_crl(const char *crl_file, x509_cert *cert, const char *subject)
       goto end;
     }
 
-  if (0 != x509parse_revoked(cert, &crl))
+  if (!polar_ok(x509_crt_revoked(cert, &crl)))
     {
-      msg (D_HANDSHAKE, "CRL CHECK FAILED: %s is REVOKED", subject);
+      serial = backend_x509_get_serial_hex(cert, &gc);
+      msg (D_HANDSHAKE, "CRL CHECK FAILED: %s (serial %s) is REVOKED", subject, (serial ? serial : "NOT AVAILABLE"));
       goto end;
     }
 
@@ -442,6 +392,7 @@ x509_verify_crl(const char *crl_file, x509_cert *cert, const char *subject)
   msg (D_HANDSHAKE, "CRL CHECK OK: %s",subject);
 
 end:
+  gc_free(&gc);
   x509_crl_free(&crl);
   return retval;
 }
