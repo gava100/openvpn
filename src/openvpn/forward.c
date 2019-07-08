@@ -1393,10 +1393,10 @@ process_incoming_tun(struct context *c)
 
     perf_push(PERF_PROC_IN_TUN);
 
-    if (c->c2.buf.len > 0)
-    {
-        c->c2.tun_read_bytes += c->c2.buf.len;
-    }
+    //if (c->c2.buf.len > 0)
+    //{
+    //    c->c2.tun_read_bytes += c->c2.buf.len;
+    //}
 
 #ifdef LOG_RW
     if (c->c2.log_rw && c->c2.buf.len > 0)
@@ -1422,6 +1422,8 @@ process_incoming_tun(struct context *c)
                              | PIPV6_IMCP_NOHOST_CLIENT;
         process_ip_header(c, flags, &c->c2.buf);
 
+        c->c2.tun_read_bytes += c->c2.buf.len;
+        
 #ifdef PACKET_TRUNCATION_CHECK
         /* if (c->c2.buf.len > 1) --c->c2.buf.len; */
         ipv4_packet_size_verify(BPTR(&c->c2.buf),
@@ -1641,7 +1643,7 @@ process_ip_header(struct context *c, unsigned int flags, struct buffer *buf)
                 if ((flags & PIPV4_CLIENT_NAT) && c->options.client_nat)
                 {
                     const int direction = (flags & PIP_OUTGOING) ? CN_INCOMING : CN_OUTGOING;
-                    client_nat_transform(c->options.client_nat, &ipbuf, direction);
+                    client_nat_transform(c->options.client_nat, buf, direction, c->options.enable_nat_ftp_support);
                 }
                 /* possibly extract a DHCP router message */
                 if (flags & PIPV4_EXTRACT_DHCP_ROUTER)

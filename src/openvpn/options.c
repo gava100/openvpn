@@ -232,6 +232,9 @@ static const char usage_message[] =
     "                   (Server) Instead of forwarding IPv6 packets send\n"
     "                   ICMPv6 host unreachable packets to the client.\n"
     "--client-nat snat|dnat network netmask alias : on client add 1-to-1 NAT rule.\n"
+    "--enable-nat-ftp-support : Enable NAT FTP Support, replacing the IP address on FTP PORT commands or PASV responses?\n"  
+    "                  'no'    -- No, disable this feature.\n"
+    "                  'yes'   -- Yes, enable this feature (Enabled by default).\n"
     "--push-peer-info : (client only) push client info to server.\n"
     "--setenv name value : Set a custom environmental variable to pass to script.\n"
     "--setenv FORWARD_COMPATIBLE 1 : Relax config file syntax checking to allow\n"
@@ -913,6 +916,8 @@ init_options(struct options *o, const bool init_gc)
 #endif /* _WIN32 */
 #endif /* P2MP_SERVER */
     o->allow_recursive_routing = false;
+    
+    o->enable_nat_ftp_support = true;
 }
 
 void
@@ -1646,6 +1651,7 @@ show_settings(const struct options *o)
     if (o->client_nat)
     {
         print_client_nat_list(o->client_nat, D_SHOW_PARMS);
+        SHOW_BOOL(enable_nat_ftp_support);
     }
 
 #ifdef ENABLE_MANAGEMENT
@@ -6164,6 +6170,21 @@ add_option(struct options *options,
         VERIFY_PERMISSION(OPT_P_ROUTE);
         cnol_check_alloc(options);
         add_client_nat_to_option_list(options->client_nat, p[1], p[2], p[3], p[4], msglevel);
+    }
+    else if (streq (p[0], "enable-nat-ftp-support"))
+    {
+        if (p[1])
+        {
+            if (streq (p[1], "yes"))
+                options->enable_nat_ftp_support = true;
+            else if (streq (p[1], "no"))
+                options->enable_nat_ftp_support = false;
+            else
+            {
+                msg (msglevel, "bad enable-nat-ftp-support option: %s -- must be 'yes' or 'no'", p[1]);
+                goto err;
+            }
+        }
     }
     else if (streq(p[0], "route") && p[1] && !p[5])
     {
