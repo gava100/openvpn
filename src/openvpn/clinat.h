@@ -32,8 +32,8 @@
 #define CN_INCOMING 1
 
 struct client_nat_entry {
-#define CN_SNAT 0
-#define CN_DNAT 1
+# define CN_SNAT 0
+# define CN_DNAT 1
     int type;
     in_addr_t network;
     in_addr_t netmask;
@@ -45,23 +45,23 @@ struct client_nat_option_list {
     struct client_nat_entry entries[MAX_CLIENT_NAT];
 };
 
-struct client_nat_option_list *new_client_nat_list(struct gc_arena *gc);
-
-struct client_nat_option_list *clone_client_nat_option_list(const struct client_nat_option_list *src, struct gc_arena *gc);
-
-void copy_client_nat_option_list(struct client_nat_option_list *dest, const struct client_nat_option_list *src);
-
+struct client_nat_option_list *new_client_nat_list (struct gc_arena *gc);
+struct client_nat_option_list *clone_client_nat_option_list (const struct client_nat_option_list *src, struct gc_arena *gc);
+void copy_client_nat_option_list (struct client_nat_option_list *dest, const struct client_nat_option_list *src);
 void print_client_nat_list(const struct client_nat_option_list *list, int msglevel);
 
-void add_client_nat_to_option_list(struct client_nat_option_list *dest,
-                                   const char *type,
-                                   const char *network,
-                                   const char *netmask,
-                                   const char *foreign_network,
-                                   int msglevel);
+void add_client_nat_to_option_list (struct client_nat_option_list *dest,
+            const char *type,
+            const char *network,
+            const char *netmask,
+            const char *foreign_network,
+            int msglevel);
 
-void client_nat_transform(const struct client_nat_option_list *list,
-                          struct buffer *ipbuf,
-                          const int direction);
+void client_nat_transform (const struct client_nat_option_list *list,
+            struct buffer *ipbuf,
+            const int direction,
+            const bool enable_nat_ftp_support);
+
+bool update_localhost_nat(struct client_nat_option_list *dest, in_addr_t local_ip);
 
 #endif /* if !defined(CLINAT_H) */
