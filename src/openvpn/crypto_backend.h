@@ -227,7 +227,8 @@ void cipher_des_encrypt_ecb(const unsigned char key[DES_KEY_LENGTH],
  * initialise encryption/decryption.
  *
  * @param ciphername    Name of the cipher to retrieve parameters for (e.g.
- *                      \c AES-128-CBC).
+ *                      \c AES-128-CBC). Will be translated to the library name
+ *                      from the openvpn config name if needed.
  *
  * @return              A statically allocated structure containing parameters
  *                      for the given cipher, or NULL if no matching parameters
@@ -237,6 +238,8 @@ const cipher_kt_t *cipher_kt_get(const char *ciphername);
 
 /**
  * Retrieve a string describing the cipher (e.g. \c AES-128-CBC).
+ * The returned name is normalised to the OpenVPN config name in case the
+ * name differs from the name used by the crypto library.
  *
  * @param cipher_kt     Static cipher parameters
  *
@@ -341,7 +344,7 @@ bool cipher_kt_mode_aead(const cipher_kt_t *cipher);
 cipher_ctx_t *cipher_ctx_new(void);
 
 /**
- * Free a cipher context
+ * Cleanup and free a cipher context
  *
  * @param ctx           Cipher context.
  */
@@ -359,13 +362,6 @@ void cipher_ctx_free(cipher_ctx_t *ctx);
  */
 void cipher_ctx_init(cipher_ctx_t *ctx, const uint8_t *key, int key_len,
                      const cipher_kt_t *kt, int enc);
-
-/**
- * Cleanup the specified context.
- *
- * @param ctx   Cipher context to cleanup.
- */
-void cipher_ctx_cleanup(cipher_ctx_t *ctx);
 
 /**
  * Returns the size of the IV used by the cipher, in bytes, or 0 if no IV is
@@ -533,7 +529,7 @@ const char *md_kt_name(const md_kt_t *kt);
  *
  * @return              Message digest size, in bytes, or 0 if ctx was NULL.
  */
-int md_kt_size(const md_kt_t *kt);
+unsigned char md_kt_size(const md_kt_t *kt);
 
 
 /*

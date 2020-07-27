@@ -59,22 +59,10 @@
 #include "ssl.h"
 #include "ssl_verify.h"
 #include "ssl_backend.h"
+#include "ssl_ncp.h"
+#include "auth_token.h"
 
 #include "memdbg.h"
-
-#ifndef ENABLE_OCC
-static const char ssl_default_options_string[] = "V0 UNDEF";
-#endif
-
-static inline const char *
-local_options_string(const struct tls_session *session)
-{
-#ifdef ENABLE_OCC
-    return session->opt->local_options;
-#else
-    return ssl_default_options_string;
-#endif
-}
 
 #ifdef MEASURE_TLS_HANDSHAKE_STATS
 
@@ -463,7 +451,7 @@ ssl_set_auth_token(const char *token)
  * Cleans an auth token and checks if it was active
  */
 bool
-ssl_clean_auth_token (void)
+ssl_clean_auth_token(void)
 {
     bool wasdefined = auth_token.defined;
     purge_user_pass(&auth_token, true);
@@ -555,7 +543,7 @@ tls_version_parse(const char *vstr, const char *extra)
  */
 static void
 tls_ctx_reload_crl(struct tls_root_ctx *ssl_ctx, const char *crl_file,
-                   const char *crl_file_inline)
+                   bool crl_file_inline)
 {
     /* if something goes wrong with stat(), we'll store 0 as mtime */
     platform_stat_t crl_stat = {0};
@@ -627,6 +615,12 @@ init_ssl(const struct options *options, struct tls_root_ctx *new_ctx)
     tls_ctx_restrict_ciphers(new_ctx, options->cipher_list);
     tls_ctx_restrict_ciphers_tls13(new_ctx, options->cipher_list_tls13);
 
+    /* Set the allow groups/curves for TLS if we want to override them */
+    if (options->tls_groups)
+    {
+        tls_ctx_set_tls_groups(new_ctx, options->tls_groups);
+    }
+
     if (!tls_ctx_set_options(new_ctx, options->ssl_flags))
     {
         goto err;
@@ -662,7 +656,7 @@ init_ssl(const struct options *options, struct tls_root_ctx *new_ctx)
     {
         char *cert = management_query_cert(management,
                                            options->management_certificate);
-        tls_ctx_load_cert_file(new_ctx, INLINE_FILE_TAG, cert);
+        tls_ctx_load_cert_file(new_ctx, cert, true);
         free(cert);
     }
 #endif
@@ -852,23 +846,12 @@ print_key_id(struct tls_multi *multi, struct gc_arena *gc)
 }
 
 bool
-is_hard_reset(int op, int key_method)
+is_hard_reset_method2(int op)
 {
-    if (!key_method || key_method == 1)
+    if (op == P_CONTROL_HARD_RESET_CLIENT_V2 || op == P_CONTROL_HARD_RESET_SERVER_V2
+        || op == P_CONTROL_HARD_RESET_CLIENT_V3)
     {
-        if (op == P_CONTROL_HARD_RESET_CLIENT_V1 || op == P_CONTROL_HARD_RESET_SERVER_V1)
-        {
-            return true;
-        }
-    }
-
-    if (!key_method || key_method >= 2)
-    {
-        if (op == P_CONTROL_HARD_RESET_CLIENT_V2 || op == P_CONTROL_HARD_RESET_SERVER_V2
-            || op == P_CONTROL_HARD_RESET_CLIENT_V3)
-        {
-            return true;
-        }
+        return true;
     }
 
     return false;
@@ -1088,23 +1071,14 @@ tls_session_init(struct tls_multi *multi, struct tls_session *session)
     }
 
     /* Are we a TLS server or client? */
-    ASSERT(session->opt->key_method >= 1);
-    if (session->opt->key_method == 1)
+    if (session->opt->server)
     {
-        session->initial_opcode = session->opt->server ?
-                                  P_CONTROL_HARD_RESET_SERVER_V1 : P_CONTROL_HARD_RESET_CLIENT_V1;
+        session->initial_opcode = P_CONTROL_HARD_RESET_SERVER_V2;
     }
-    else /* session->opt->key_method >= 2 */
+    else
     {
-        if (session->opt->server)
-        {
-            session->initial_opcode = P_CONTROL_HARD_RESET_SERVER_V2;
-        }
-        else
-        {
-            session->initial_opcode = session->opt->tls_crypt_v2 ?
-                                      P_CONTROL_HARD_RESET_CLIENT_V3 : P_CONTROL_HARD_RESET_CLIENT_V2;
-        }
+        session->initial_opcode = session->opt->tls_crypt_v2 ?
+                                  P_CONTROL_HARD_RESET_CLIENT_V3 : P_CONTROL_HARD_RESET_CLIENT_V2;
     }
 
     /* Initialize control channel authentication parameters */
@@ -1228,11 +1202,10 @@ lame_duck_must_die(const struct tls_session *session, interval_t *wakeup)
     const struct key_state *lame = &session->key[KS_LAME_DUCK];
     if (lame->state >= S_INITIAL)
     {
-        const time_t local_now = now;
         ASSERT(lame->must_die); /* a lame duck key must always have an expiration */
-        if (local_now < lame->must_die)
+        if (now < lame->must_die)
         {
-            compute_earliest_wakeup(wakeup, lame->must_die - local_now);
+            compute_earliest_wakeup(wakeup, lame->must_die - now);
             return false;
         }
         else
@@ -1331,11 +1304,9 @@ tls_multi_init_set_options(struct tls_multi *multi,
                            const char *local,
                            const char *remote)
 {
-#ifdef ENABLE_OCC
     /* initialize options string */
     multi->opt.local_options = local;
     multi->opt.remote_options = remote;
-#endif
 }
 
 /*
@@ -1348,13 +1319,9 @@ tls_multi_free(struct tls_multi *multi, bool clear)
 
     ASSERT(multi);
 
-#ifdef MANAGEMENT_DEF_AUTH
-    man_def_auth_set_client_reason(multi, NULL);
+    auth_set_client_reason(multi, NULL);
 
-#endif
-#if P2MP_SERVER
     free(multi->peer_info);
-#endif
 
     if (multi->locked_cn)
     {
@@ -1368,11 +1335,7 @@ tls_multi_free(struct tls_multi *multi, bool clear)
 
     cert_hash_free(multi->locked_cert_hash_set);
 
-    if (multi->auth_token)
-    {
-        secure_memzero(multi->auth_token, AUTH_TOKEN_SIZE);
-        free(multi->auth_token);
-    }
+    wipe_auth_token(multi);
 
     free(multi->remote_ciphername);
 
@@ -1919,40 +1882,6 @@ key_ctx_update_implicit_iv(struct key_ctx *ctx, uint8_t *key, size_t key_len)
     }
 }
 
-bool
-tls_item_in_cipher_list(const char *item, const char *list)
-{
-    char *tmp_ciphers = string_alloc(list, NULL);
-    char *tmp_ciphers_orig = tmp_ciphers;
-
-    const char *token = strtok(tmp_ciphers, ":");
-    while (token)
-    {
-        if (0 == strcmp(token, item))
-        {
-            break;
-        }
-        token = strtok(NULL, ":");
-    }
-    free(tmp_ciphers_orig);
-
-    return token != NULL;
-}
-
-void
-tls_poor_mans_ncp(struct options *o, const char *remote_ciphername)
-{
-    if (o->ncp_enabled && remote_ciphername
-        && 0 != strcmp(o->ciphername, remote_ciphername))
-    {
-        if (tls_item_in_cipher_list(remote_ciphername, o->ncp_ciphers))
-        {
-            o->ciphername = string_alloc(remote_ciphername, &o->gc);
-            msg(D_TLS_DEBUG_LOW, "Using peer cipher '%s'", o->ciphername);
-        }
-    }
-}
-
 /**
  * Generate data channel keys for the supplied TLS session.
  *
@@ -1969,7 +1898,11 @@ tls_session_generate_data_channel_keys(struct tls_session *session)
     const struct session_id *server_sid = !session->opt->server ?
                                           &ks->session_id_remote : &session->session_id;
 
-    ASSERT(ks->authenticated);
+    if (ks->authenticated == KS_AUTH_FALSE)
+    {
+        msg(D_TLS_ERRORS, "TLS Error: key_state not authenticated");
+        goto cleanup;
+    }
 
     ks->crypto_options.flags = session->opt->crypto_flags;
     if (!generate_key_expansion(&ks->crypto_options.key_ctx_bi,
@@ -1993,6 +1926,12 @@ tls_session_update_crypto_params(struct tls_session *session,
                                  struct options *options, struct frame *frame,
                                  struct frame *frame_fragment)
 {
+    if (session->key[KS_PRIMARY].crypto_options.key_ctx_bi.initialized)
+    {
+        /* keys already generated, nothing to do */
+        return true;
+    }
+
     if (!session->opt->server
         && 0 != strcmp(options->ciphername, session->opt->config_ciphername)
         && !tls_item_in_cipher_list(options->ciphername, options->ncp_ciphers))
@@ -2014,6 +1953,13 @@ tls_session_update_crypto_params(struct tls_session *session,
             msg(D_HANDSHAKE, "NCP: overriding user-set keysize with default");
             options->keysize = 0;
         }
+    }
+    else
+    {
+      /* Very hacky workaround and quick fix for frame calculation
+       * different when adjusting frame size when the original and new cipher
+       * are identical to avoid a regression with client without NCP */
+        return tls_session_generate_data_channel_keys(session);
     }
 
     init_key_type(&session->opt->key_type, options->ciphername,
@@ -2046,7 +1992,7 @@ tls_session_update_crypto_params(struct tls_session *session,
     {
         frame_remove_from_extra_frame(frame_fragment, crypto_max_overhead());
         crypto_adjust_frame_parameters(frame_fragment, &session->opt->key_type,
-	                               options->replay, packet_id_long_form);
+                                       options->replay, packet_id_long_form);
         frame_set_mtu_dynamic(frame_fragment, options->ce.fragment, SET_MTU_UPPER_BOUND);
         frame_print(frame_fragment, D_MTU_INFO, "Fragmentation MTU parms");
     }
@@ -2242,52 +2188,6 @@ read_string_alloc(struct buffer *buf)
     return str;
 }
 
-/*
- * Handle the reading and writing of key data to and from
- * the TLS control channel (cleartext).
- */
-
-static bool
-key_method_1_write(struct buffer *buf, struct tls_session *session)
-{
-    struct key key;
-    struct key_state *ks = &session->key[KS_PRIMARY];      /* primary key */
-
-    ASSERT(session->opt->key_method == 1);
-    ASSERT(buf_init(buf, 0));
-
-    generate_key_random(&key, &session->opt->key_type);
-    if (!check_key(&key, &session->opt->key_type))
-    {
-        msg(D_TLS_ERRORS, "TLS Error: Bad encrypting key generated");
-        return false;
-    }
-
-    if (!write_key(&key, &session->opt->key_type, buf))
-    {
-        msg(D_TLS_ERRORS, "TLS Error: write_key failed");
-        return false;
-    }
-
-    init_key_ctx(&ks->crypto_options.key_ctx_bi.encrypt, &key,
-                 &session->opt->key_type, OPENVPN_OP_ENCRYPT,
-                 "Data Channel Encrypt");
-    secure_memzero(&key, sizeof(key));
-
-    /* send local options string */
-    {
-        const char *local_options = local_options_string(session);
-        const int optlen = strlen(local_options) + 1;
-        if (!buf_write(buf, local_options, optlen))
-        {
-            msg(D_TLS_ERRORS, "TLS Error: KM1 write options failed");
-            return false;
-        }
-    }
-
-    return true;
-}
-
 static bool
 push_peer_info(struct buffer *buf, struct tls_session *session)
 {
@@ -2323,13 +2223,30 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
 #endif
 
         /* support for P_DATA_V2 */
-        buf_printf(&out, "IV_PROTO=2\n");
+        int iv_proto = IV_PROTO_DATA_V2;
+
+        /* support for receiving push_reply before sending
+         * push request, also signal that the client wants
+         * to get push-reply messages without without requiring a round
+         * trip for a push request message*/
+        if(session->opt->pull)
+        {
+            iv_proto |= IV_PROTO_REQUEST_PUSH;
+        }
+
+        buf_printf(&out, "IV_PROTO=%d\n", iv_proto);
 
         /* support for Negotiable Crypto Parameters */
         if (session->opt->ncp_enabled
             && (session->opt->mode == MODE_SERVER || session->opt->pull))
         {
-            buf_printf(&out, "IV_NCP=2\n");
+            if (tls_item_in_cipher_list("AES-128-GCM", session->opt->config_ncp_ciphers)
+                && tls_item_in_cipher_list("AES-256-GCM", session->opt->config_ncp_ciphers))
+            {
+
+                buf_printf(&out, "IV_NCP=2\n");
+            }
+            buf_printf(&out, "IV_CIPHERS=%s\n", session->opt->config_ncp_ciphers);
         }
 
         /* push compression status */
@@ -2360,7 +2277,9 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
                 if ((((strncmp(e->string, "UV_", 3)==0
                        || strncmp(e->string, "IV_PLAT_VER=", sizeof("IV_PLAT_VER=")-1)==0)
                       && session->opt->push_peer_info_detail >= 2)
-                     || (strncmp(e->string,"IV_GUI_VER=",sizeof("IV_GUI_VER=")-1)==0))
+                     || (strncmp(e->string,"IV_GUI_VER=",sizeof("IV_GUI_VER=")-1)==0)
+                     || (strncmp(e->string,"IV_SSO=",sizeof("IV_SSO=")-1)==0)
+                     )
                     && buf_safe(&out, strlen(e->string)+1))
                 {
                     buf_printf(&out, "%s\n", e->string);
@@ -2387,12 +2306,15 @@ error:
     return ret;
 }
 
+/**
+ * Handle the writing of key data, peer-info, username/password, OCC
+ * to the TLS control channel (cleartext).
+ */
 static bool
 key_method_2_write(struct buffer *buf, struct tls_session *session)
 {
     struct key_state *ks = &session->key[KS_PRIMARY];      /* primary key */
 
-    ASSERT(session->opt->key_method == 2);
     ASSERT(buf_init(buf, 0));
 
     /* write a uint32 0 */
@@ -2402,7 +2324,7 @@ key_method_2_write(struct buffer *buf, struct tls_session *session)
     }
 
     /* write key_method + flags */
-    if (!buf_write_u8(buf, (session->opt->key_method & KEY_METHOD_MASK)))
+    if (!buf_write_u8(buf, KEY_METHOD_2))
     {
         goto error;
     }
@@ -2415,7 +2337,7 @@ key_method_2_write(struct buffer *buf, struct tls_session *session)
 
     /* write options string */
     {
-        if (!write_string(buf, local_options_string(session), TLS_OPTIONS_LEN))
+        if (!write_string(buf, session->opt->local_options, TLS_OPTIONS_LEN))
         {
             goto error;
         }
@@ -2436,7 +2358,9 @@ key_method_2_write(struct buffer *buf, struct tls_session *session)
          * username/password
          */
         if (auth_token.defined)
+        {
             up = &auth_token;
+        }
 
         if (!write_string(buf, up->username, -1))
         {
@@ -2482,10 +2406,9 @@ key_method_2_write(struct buffer *buf, struct tls_session *session)
      * generation is postponed until after the pull/push, so we can process pushed
      * cipher directives.
      */
-    if (session->opt->server && !(session->opt->ncp_enabled
-                                  && session->opt->mode == MODE_SERVER && ks->key_id <= 0))
+    if (session->opt->server && !(session->opt->mode == MODE_SERVER && ks->key_id <= 0))
     {
-        if (ks->authenticated)
+        if (ks->authenticated > KS_AUTH_FALSE)
         {
             if (!tls_session_generate_data_channel_keys(session))
             {
@@ -2503,73 +2426,15 @@ error:
     return false;
 }
 
-static bool
-key_method_1_read(struct buffer *buf, struct tls_session *session)
-{
-    int status;
-    struct key key;
-    struct key_state *ks = &session->key[KS_PRIMARY];      /* primary key */
-
-    ASSERT(session->opt->key_method == 1);
-
-    if (!session->verified)
-    {
-        msg(D_TLS_ERRORS,
-            "TLS Error: Certificate verification failed (key-method 1)");
-        goto error;
-    }
-
-    status = read_key(&key, &session->opt->key_type, buf);
-    if (status != 1)
-    {
-        msg(D_TLS_ERRORS,
-            "TLS Error: Error reading data channel key from plaintext buffer");
-        goto error;
-    }
-
-    if (!check_key(&key, &session->opt->key_type))
-    {
-        msg(D_TLS_ERRORS, "TLS Error: Bad decrypting key received from peer");
-        goto error;
-    }
-
-    if (buf->len < 1)
-    {
-        msg(D_TLS_ERRORS, "TLS Error: Missing options string");
-        goto error;
-    }
-
-#ifdef ENABLE_OCC
-    /* compare received remote options string
-     * with our locally computed options string */
-    if (!session->opt->disable_occ
-        && !options_cmp_equal_safe((char *) BPTR(buf), session->opt->remote_options, buf->len))
-    {
-        options_warning_safe((char *) BPTR(buf), session->opt->remote_options, buf->len);
-    }
-#endif
-
-    buf_clear(buf);
-
-    init_key_ctx(&ks->crypto_options.key_ctx_bi.decrypt, &key,
-                 &session->opt->key_type, OPENVPN_OP_DECRYPT,
-                 "Data Channel Decrypt");
-    secure_memzero(&key, sizeof(key));
-    ks->authenticated = true;
-    return true;
-
-error:
-    buf_clear(buf);
-    secure_memzero(&key, sizeof(key));
-    return false;
-}
-
+/**
+ * Handle reading key data, peer-info, username/password, OCC
+ * from the TLS control channel (cleartext).
+ */
 static bool
 key_method_2_read(struct buffer *buf, struct tls_multi *multi, struct tls_session *session)
 {
     struct key_state *ks = &session->key[KS_PRIMARY];      /* primary key */
 
-    int key_method_flags;
     bool username_status, password_status;
 
     struct gc_arena gc = gc_new();
@@ -2578,8 +2443,6 @@ key_method_2_read(struct buffer *buf, struct tls_multi *multi, struct tls_sessio
 
     /* allocate temporary objects */
     ALLOC_ARRAY_CLEAR_GC(options, char, TLS_OPTIONS_LEN, &gc);
-
-    ASSERT(session->opt->key_method == 2);
 
     /* discard leading uint32 */
     if (!buf_advance(buf, 4))
@@ -2590,7 +2453,7 @@ key_method_2_read(struct buffer *buf, struct tls_multi *multi, struct tls_sessio
     }
 
     /* get key method */
-    key_method_flags = buf_read_u8(buf);
+    int key_method_flags = buf_read_u8(buf);
     if ((key_method_flags & KEY_METHOD_MASK) != 2)
     {
         msg(D_TLS_ERRORS,
@@ -2613,7 +2476,7 @@ key_method_2_read(struct buffer *buf, struct tls_multi *multi, struct tls_sessio
         goto error;
     }
 
-    ks->authenticated = false;
+    ks->authenticated = KS_AUTH_FALSE;
 
     /* always extract username + password fields from buf, even if not
      * authenticating for it, because otherwise we can't get at the
@@ -2623,7 +2486,6 @@ key_method_2_read(struct buffer *buf, struct tls_multi *multi, struct tls_sessio
     username_status = read_string(buf, up->username, USER_PASS_LEN);
     password_status = read_string(buf, up->password, USER_PASS_LEN);
 
-#if P2MP_SERVER
     /* get peer info from control channel */
     free(multi->peer_info);
     multi->peer_info = read_string_alloc(buf);
@@ -2635,19 +2497,6 @@ key_method_2_read(struct buffer *buf, struct tls_multi *multi, struct tls_sessio
     free(multi->remote_ciphername);
     multi->remote_ciphername =
         options_string_extract_option(options, "cipher", NULL);
-
-    if (tls_peer_info_ncp_ver(multi->peer_info) < 2)
-    {
-        /* Peer does not support NCP, but leave NCP enabled if the local and
-         * remote cipher do not match to attempt 'poor-man's NCP'.
-         */
-        if (multi->remote_ciphername == NULL
-            || 0 == strcmp(multi->remote_ciphername, multi->opt.config_ciphername))
-        {
-            session->opt->ncp_enabled = false;
-        }
-    }
-#endif /* if P2MP_SERVER */
 
     if (tls_session_user_pass_enabled(session))
     {
@@ -2673,19 +2522,18 @@ key_method_2_read(struct buffer *buf, struct tls_multi *multi, struct tls_sessio
                 "TLS Error: Certificate verification failed (key-method 2)");
             goto error;
         }
-        ks->authenticated = true;
+        ks->authenticated = KS_AUTH_TRUE;
     }
 
     /* clear username and password from memory */
     secure_memzero(up, sizeof(*up));
 
     /* Perform final authentication checks */
-    if (ks->authenticated)
+    if (ks->authenticated > KS_AUTH_FALSE)
     {
         verify_final_auth_checks(multi, session);
     }
 
-#ifdef ENABLE_OCC
     /* check options consistency */
     if (!session->opt->disable_occ
         && !options_cmp_equal(options, session->opt->remote_options))
@@ -2694,10 +2542,9 @@ key_method_2_read(struct buffer *buf, struct tls_multi *multi, struct tls_sessio
         if (session->opt->ssl_flags & SSLF_OPT_VERIFY)
         {
             msg(D_TLS_ERRORS, "Option inconsistency warnings triggering disconnect due to --opt-verify");
-            ks->authenticated = false;
+            ks->authenticated = KS_AUTH_FALSE;
         }
     }
-#endif
 
     buf_clear(buf);
 
@@ -2705,13 +2552,14 @@ key_method_2_read(struct buffer *buf, struct tls_multi *multi, struct tls_sessio
      * Call OPENVPN_PLUGIN_TLS_FINAL plugin if defined, for final
      * veto opportunity over authentication decision.
      */
-    if (ks->authenticated && plugin_defined(session->opt->plugins, OPENVPN_PLUGIN_TLS_FINAL))
+    if ((ks->authenticated > KS_AUTH_FALSE)
+        && plugin_defined(session->opt->plugins, OPENVPN_PLUGIN_TLS_FINAL))
     {
         key_state_export_keying_material(&ks->ks_ssl, session);
 
         if (plugin_call(session->opt->plugins, OPENVPN_PLUGIN_TLS_FINAL, NULL, NULL, session->opt->es) != OPENVPN_PLUGIN_FUNC_SUCCESS)
         {
-            ks->authenticated = false;
+            ks->authenticated = KS_AUTH_FALSE;
         }
 
         setenv_del(session->opt->es, "exported_keying_material");
@@ -2735,6 +2583,7 @@ key_method_2_read(struct buffer *buf, struct tls_multi *multi, struct tls_sessio
     return true;
 
 error:
+    ks->authenticated = KS_AUTH_FALSE;
     secure_memzero(ks->key_src, sizeof(*ks->key_src));
     if (up)
     {
@@ -3012,23 +2861,9 @@ tls_process(struct tls_multi *multi,
         if (!buf->len && ((ks->state == S_START && !session->opt->server)
                           || (ks->state == S_GOT_KEY && session->opt->server)))
         {
-            if (session->opt->key_method == 1)
+            if (!key_method_2_write(buf, session))
             {
-                if (!key_method_1_write(buf, session))
-                {
-                    goto error;
-                }
-            }
-            else if (session->opt->key_method == 2)
-            {
-                if (!key_method_2_write(buf, session))
-                {
-                    goto error;
-                }
-            }
-            else
-            {
-                ASSERT(0);
+                goto error;
             }
 
             state_change = true;
@@ -3042,23 +2877,9 @@ tls_process(struct tls_multi *multi,
             && ((ks->state == S_SENT_KEY && !session->opt->server)
                 || (ks->state == S_START && session->opt->server)))
         {
-            if (session->opt->key_method == 1)
+            if (!key_method_2_read(buf, multi, session))
             {
-                if (!key_method_1_read(buf, session))
-                {
-                    goto error;
-                }
-            }
-            else if (session->opt->key_method == 2)
-            {
-                if (!key_method_2_read(buf, multi, session))
-                {
-                    goto error;
-                }
-            }
-            else
-            {
-                ASSERT(0);
+                goto error;
             }
 
             state_change = true;
@@ -3415,10 +3236,7 @@ tls_pre_decrypt(struct tls_multi *multi,
                  */
                 if (DECRYPT_KEY_ENABLED(multi, ks)
                     && key_id == ks->key_id
-                    && ks->authenticated
-#ifdef ENABLE_DEF_AUTH
-                    && !ks->auth_deferred
-#endif
+                    && (ks->authenticated == KS_AUTH_TRUE)
                     && (floated || link_socket_actual_match(from, &ks->remote_addr)))
                 {
                     if (!ks->crypto_options.key_ctx_bi.initialized)
@@ -3475,6 +3293,11 @@ tls_pre_decrypt(struct tls_multi *multi,
             /* verify legal opcode */
             if (op < P_FIRST_OPCODE || op > P_LAST_OPCODE)
             {
+                if (op == P_CONTROL_HARD_RESET_CLIENT_V1
+                    || op == P_CONTROL_HARD_RESET_SERVER_V1)
+                {
+                    msg(D_TLS_ERRORS, "Peer tried unsupported key-method 1");
+                }
                 msg(D_TLS_ERRORS,
                     "TLS Error: unknown opcode received from %s op=%d",
                     print_link_socket_actual(from, &gc), op);
@@ -3482,14 +3305,12 @@ tls_pre_decrypt(struct tls_multi *multi,
             }
 
             /* hard reset ? */
-            if (is_hard_reset(op, 0))
+            if (is_hard_reset_method2(op))
             {
                 /* verify client -> server or server -> client connection */
-                if (((op == P_CONTROL_HARD_RESET_CLIENT_V1
-                      || op == P_CONTROL_HARD_RESET_CLIENT_V2
+                if (((op == P_CONTROL_HARD_RESET_CLIENT_V2
                       || op == P_CONTROL_HARD_RESET_CLIENT_V3) && !multi->opt.server)
-                    || ((op == P_CONTROL_HARD_RESET_SERVER_V1
-                         || op == P_CONTROL_HARD_RESET_SERVER_V2) && multi->opt.server))
+                    || ((op == P_CONTROL_HARD_RESET_SERVER_V2) && multi->opt.server))
                 {
                     msg(D_TLS_ERRORS,
                         "TLS Error: client->client or server->server connection attempted from %s",
@@ -3551,21 +3372,13 @@ tls_pre_decrypt(struct tls_multi *multi,
             }
 
             /*
-             * Initial packet received.
+             * Hard reset and session id does not match any session in
+             * multi->session: Possible initial packet
              */
-
-            if (i == TM_SIZE && is_hard_reset(op, 0))
+            if (i == TM_SIZE && is_hard_reset_method2(op))
             {
                 struct tls_session *session = &multi->session[TM_ACTIVE];
                 struct key_state *ks = &session->key[KS_PRIMARY];
-
-                if (!is_hard_reset(op, multi->opt.key_method))
-                {
-                    msg(D_TLS_ERRORS, "TLS ERROR: initial packet local/remote key_method mismatch, local key_method=%d, op=%s",
-                        multi->opt.key_method,
-                        packet_opcode_name(op));
-                    goto error;
-                }
 
                 /*
                  * If we have no session currently in progress, the initial packet will
@@ -3606,7 +3419,11 @@ tls_pre_decrypt(struct tls_multi *multi,
                 }
             }
 
-            if (i == TM_SIZE && is_hard_reset(op, 0))
+            /*
+             * If we detected new session in the last if block, i has
+             * changed to TM_ACTIVE, so check the condition again.
+             */
+            if (i == TM_SIZE && is_hard_reset_method2(op))
             {
                 /*
                  * No match with existing sessions,
@@ -3623,14 +3440,6 @@ tls_pre_decrypt(struct tls_multi *multi,
                     msg(D_TLS_ERRORS,
                         "TLS Error: Cannot accept new session request from %s due to session context expire or --single-session [2]",
                         print_link_socket_actual(from, &gc));
-                    goto error;
-                }
-
-                if (!is_hard_reset(op, multi->opt.key_method))
-                {
-                    msg(D_TLS_ERRORS, "TLS ERROR: new session local/remote key_method mismatch, local key_method=%d, op=%s",
-                        multi->opt.key_method,
-                        packet_opcode_name(op));
                     goto error;
                 }
 
@@ -3967,11 +3776,8 @@ tls_pre_encrypt(struct tls_multi *multi,
         {
             struct key_state *ks = multi->key_scan[i];
             if (ks->state >= S_ACTIVE
-                && ks->authenticated
+                && (ks->authenticated == KS_AUTH_TRUE)
                 && ks->crypto_options.key_ctx_bi.initialized
-#ifdef ENABLE_DEF_AUTH
-                && !ks->auth_deferred
-#endif
                 )
             {
                 if (!ks_select)
@@ -4153,45 +3959,6 @@ tls_update_remote_addr(struct tls_multi *multi, const struct link_socket_actual 
     gc_free(&gc);
 }
 
-int
-tls_peer_info_ncp_ver(const char *peer_info)
-{
-    const char *ncpstr = peer_info ? strstr(peer_info, "IV_NCP=") : NULL;
-    if (ncpstr)
-    {
-        int ncp = 0;
-        int r = sscanf(ncpstr, "IV_NCP=%d", &ncp);
-        if (r == 1)
-        {
-            return ncp;
-        }
-    }
-    return 0;
-}
-
-bool
-tls_check_ncp_cipher_list(const char *list)
-{
-    bool unsupported_cipher_found = false;
-
-    ASSERT(list);
-
-    char *const tmp_ciphers = string_alloc(list, NULL);
-    const char *token = strtok(tmp_ciphers, ":");
-    while (token)
-    {
-        if (!cipher_kt_get(translate_cipher_name_from_openvpn(token)))
-        {
-            msg(M_WARN, "Unsupported cipher in --ncp-ciphers: %s", token);
-            unsupported_cipher_found = true;
-        }
-        token = strtok(NULL, ":");
-    }
-    free(tmp_ciphers);
-
-    return 0 < strlen(list) && !unsupported_cipher_found;
-}
-
 void
 show_available_tls_ciphers(const char *cipher_list,
                            const char *cipher_list_tls13,
@@ -4199,12 +3966,11 @@ show_available_tls_ciphers(const char *cipher_list,
 {
     printf("Available TLS Ciphers, listed in order of preference:\n");
 
-#if (ENABLE_CRYPTO_OPENSSL && OPENSSL_VERSION_NUMBER >= 0x1010100fL)
-    printf("\nFor TLS 1.3 and newer (--tls-ciphersuites):\n\n");
-    show_available_tls_ciphers_list(cipher_list_tls13, tls_cert_profile, true);
-#else
-    (void) cipher_list_tls13;  /* Avoid unused warning */
-#endif
+    if (tls_version_max() >= TLS_VER_1_3)
+    {
+        printf("\nFor TLS 1.3 and newer (--tls-ciphersuites):\n\n");
+        show_available_tls_ciphers_list(cipher_list_tls13, tls_cert_profile, true);
+    }
 
     printf("\nFor TLS 1.2 and older (--tls-cipher):\n\n");
     show_available_tls_ciphers_list(cipher_list, tls_cert_profile, false);

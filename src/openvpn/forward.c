@@ -139,21 +139,6 @@ check_incoming_control_channel(struct context *c)
 }
 
 /*
- * Options like --up-delay need to be triggered by this function which
- * checks for connection establishment.
- */
-static inline void
-check_connection_established(struct context *c)
-{
-    void check_connection_established_dowork(struct context *c);
-
-    if (event_timeout_defined(&c->c2.wait_for_connect))
-    {
-        check_connection_established_dowork(c);
-    }
-}
-
-/*
  * Should we add routes?
  */
 static inline void
@@ -395,6 +380,18 @@ check_incoming_control_channel_dowork(struct context *c)
             {
                 server_pushed_signal(c, &buf, false, 4);
             }
+            else if (buf_string_match_head_str(&buf, "INFO_PRE"))
+            {
+                server_pushed_info(c, &buf, 8);
+            }
+            else if (buf_string_match_head_str(&buf, "INFO"))
+            {
+                server_pushed_info(c, &buf, 4);
+            }
+            else if (buf_string_match_head_str(&buf, "CR_RESPONSE"))
+            {
+                receive_cr_response(c, &buf);
+            }
             else
             {
                 msg(D_PUSH_ERRORS, "WARNING: Received unknown control message: %s", BSTR(&buf));
@@ -425,43 +422,48 @@ check_push_request_dowork(struct context *c)
 
 /*
  * Things that need to happen immediately after connection initiation should go here.
+ *
+ * Options like --up-delay need to be triggered by this function which
+ * checks for connection establishment.
+ *
+ * Note: The process_incoming_push_reply currently assumes that this function
+ * only sets up the pull request timer when pull is enabled.
  */
 void
-check_connection_established_dowork(struct context *c)
+check_connection_established(struct context *c)
 {
-    if (event_timeout_trigger(&c->c2.wait_for_connect, &c->c2.timeval, ETT_DEFAULT))
-    {
-        if (CONNECTION_ESTABLISHED(c))
-        {
-#if P2MP
-            /* if --pull was specified, send a push request to server */
-            if (c->c2.tls_multi && c->options.pull)
-            {
-#ifdef ENABLE_MANAGEMENT
-                if (management)
-                {
-                    management_set_state(management,
-                                         OPENVPN_STATE_GET_CONFIG,
-                                         NULL,
-                                         NULL,
-                                         NULL,
-                                         NULL,
-                                         NULL);
-                }
-#endif
-                /* fire up push request right away (already 1s delayed) */
-                event_timeout_init(&c->c2.push_request_interval, 0, now);
-                reset_coarse_timers(c);
-            }
-            else
-#endif /* if P2MP */
-            {
-                do_up(c, false, 0);
-            }
 
-            event_timeout_clear(&c->c2.wait_for_connect);
+    if (CONNECTION_ESTABLISHED(c))
+    {
+#if P2MP
+        /* if --pull was specified, send a push request to server */
+        if (c->c2.tls_multi && c->options.pull)
+        {
+#ifdef ENABLE_MANAGEMENT
+            if (management)
+            {
+                management_set_state(management,
+                                     OPENVPN_STATE_GET_CONFIG,
+                                     NULL,
+                                     NULL,
+                                     NULL,
+                                     NULL,
+                                     NULL);
+            }
+#endif
+            /* fire up push request right away (already 1s delayed) */
+            event_timeout_init(&c->c2.push_request_interval, 0, now);
+            reset_coarse_timers(c);
         }
+        else
+#endif /* if P2MP */
+        {
+            do_up(c, false, 0);
+        }
+
+        event_timeout_clear(&c->c2.wait_for_connect);
     }
+
 }
 
 bool
@@ -682,7 +684,6 @@ encrypt_sign(struct context *c, bool comp_frag)
     const uint8_t *orig_buf = c->c2.buf.data;
     struct crypto_options *co = NULL;
 
-#if P2MP_SERVER
     /*
      * Drop non-TLS outgoing packet if client-connect script/plugin
      * has not yet succeeded.
@@ -691,7 +692,6 @@ encrypt_sign(struct context *c, bool comp_frag)
     {
         c->c2.buf.len = 0;
     }
-#endif
 
     if (comp_frag)
     {
@@ -767,8 +767,10 @@ process_coarse_timers(struct context *c)
     check_status_file(c);
 
     /* process connection establishment items */
-    check_connection_established(c);
-
+    if (event_timeout_trigger(&c->c2.wait_for_connect, &c->c2.timeval, ETT_DEFAULT))
+    {
+        check_connection_established(c);
+    }
 #if P2MP
     /* see if we should send a push_request in response to --pull */
     check_push_request(c);
@@ -812,7 +814,6 @@ process_coarse_timers(struct context *c)
     }
 #endif
 
-#ifdef ENABLE_OCC
     /* Should we send an OCC_REQUEST message? */
     check_send_occ_req(c);
 
@@ -824,7 +825,6 @@ process_coarse_timers(struct context *c)
     {
         process_explicit_exit_notification_timer_wakeup(c);
     }
-#endif
 
     /* Should we ping the remote? */
     check_ping_send(c);
@@ -973,14 +973,12 @@ read_incoming_link(struct context *c)
             }
             else
             {
-#ifdef ENABLE_OCC
                 if (event_timeout_defined(&c->c2.explicit_exit_notification_interval))
                 {
                     msg(D_STREAM_ERRORS, "Connection reset during exit notification period, ignoring [%d]", status);
                     management_sleep(1);
                 }
                 else
-#endif
                 {
                     register_signal(c, SIGUSR1, "connection-reset"); /* SOFT-SIGUSR1 -- TCP connection reset */
                     msg(D_STREAM_ERRORS, "Connection reset, restarting [%d]", status);
@@ -1090,7 +1088,7 @@ process_incoming_link_part1(struct context *c, struct link_socket_info *lsi, boo
                                 floated, &ad_start))
             {
                 /* Restore pre-NCP frame parameters */
-                if (is_hard_reset(opcode, c->options.key_method))
+                if (is_hard_reset_method2(opcode))
                 {
                     c->c2.frame = c->c2.frame_initial;
 #ifdef ENABLE_FRAGMENT
@@ -1111,16 +1109,15 @@ process_incoming_link_part1(struct context *c, struct link_socket_info *lsi, boo
         {
             co = &c->c2.crypto_options;
         }
-#if P2MP_SERVER
+
         /*
-         * Drop non-TLS packet if client-connect script/plugin has not
-         * yet succeeded.
+         * Drop non-TLS packet if client-connect script/plugin and cipher selection
+         * has not yet succeeded.
          */
         if (c->c2.context_auth != CAS_SUCCEEDED)
         {
             c->c2.buf.len = 0;
         }
-#endif
 
         /* authenticate and decrypt the incoming packet */
         decrypt_status = openvpn_decrypt(&c->c2.buf, c->c2.buffers->decrypt_buf,
@@ -1205,13 +1202,11 @@ process_incoming_link_part2(struct context *c, struct link_socket_info *lsi, con
             c->c2.buf.len = 0; /* drop packet */
         }
 
-#ifdef ENABLE_OCC
         /* Did we just receive an OCC packet? */
         if (is_occ_msg(&c->c2.buf))
         {
             process_received_occ_msg(c);
         }
-#endif
 
         buffer_turnover(orig_buf, &c->c2.to_tun, &c->c2.buf, &c->c2.buffers->read_link_buf);
 
@@ -1256,13 +1251,29 @@ read_incoming_tun(struct context *c)
     perf_push(PERF_READ_IN_TUN);
 
     c->c2.buf = c->c2.buffers->read_tun_buf;
-#ifdef TUN_PASS_BUFFER
-    read_tun_buffered(c->c1.tuntap, &c->c2.buf);
-#else
+
+#ifdef _WIN32
+    if (c->c1.tuntap->windows_driver == WINDOWS_DRIVER_WINTUN)
+    {
+        read_wintun(c->c1.tuntap, &c->c2.buf);
+        if (c->c2.buf.len == -1)
+        {
+            register_signal(c, SIGHUP, "tun-abort");
+            c->persist.restart_sleep_seconds = 1;
+            msg(M_INFO, "Wintun read error, restarting");
+            perf_pop();
+            return;
+        }
+    }
+    else
+    {
+        read_tun_buffered(c->c1.tuntap, &c->c2.buf);
+    }
+#else  /* ifdef _WIN32 */
     ASSERT(buf_init(&c->c2.buf, FRAME_HEADROOM(&c->c2.frame)));
     ASSERT(buf_safe(&c->c2.buf, MAX_RW_SIZE_TUN(&c->c2.frame)));
     c->c2.buf.len = read_tun(c->c1.tuntap, BPTR(&c->c2.buf), MAX_RW_SIZE_TUN(&c->c2.frame));
-#endif
+#endif /* ifdef _WIN32 */
 
 #ifdef PACKET_TRUNCATION_CHECK
     ipv4_packet_size_verify(BPTR(&c->c2.buf),
@@ -1879,7 +1890,7 @@ process_outgoing_tun(struct context *c)
                                 &c->c2.n_trunc_tun_write);
 #endif
 
-#ifdef TUN_PASS_BUFFER
+#ifdef _WIN32
         size = write_tun_buffered(c->c1.tuntap, &c->c2.to_tun);
 #else
         size = write_tun(c->c1.tuntap, BPTR(&c->c2.to_tun), BLEN(&c->c2.to_tun));
@@ -1969,10 +1980,8 @@ pre_select(struct context *c)
     /* check for incoming configuration info on the control channel */
     check_incoming_control_channel(c);
 
-#ifdef ENABLE_OCC
     /* Should we send an OCC message? */
     check_send_occ_msg(c);
-#endif
 
 #ifdef ENABLE_FRAGMENT
     /* Should we deliver a datagram fragment to remote? */
@@ -2100,6 +2109,17 @@ io_wait_dowork(struct context *c, const unsigned int flags)
     {
         tuntap |= EVENT_READ;
     }
+
+#ifdef _WIN32
+    if (tuntap_is_wintun(c->c1.tuntap))
+    {
+        /*
+         * With wintun we are only interested in read event. Ring buffer is
+         * always ready for write, so we don't do wait.
+         */
+        tuntap = EVENT_READ;
+    }
+#endif
 
     /*
      * Configure event wait based on socket, tuntap flags.

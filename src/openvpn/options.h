@@ -133,17 +133,17 @@ struct connection_entry
 
     /* Shared secret used for TLS control channel authentication */
     const char *tls_auth_file;
-    const char *tls_auth_file_inline;
+    bool tls_auth_file_inline;
     int key_direction;
 
     /* Shared secret used for TLS control channel authenticated encryption */
     const char *tls_crypt_file;
-    const char *tls_crypt_inline;
+    bool tls_crypt_file_inline;
 
     /* Client-specific secret or server key used for TLS control channel
      * authenticated encryption v2 */
     const char *tls_crypt_v2_file;
-    const char *tls_crypt_v2_inline;
+    bool tls_crypt_v2_file_inline;
 };
 
 struct remote_entry
@@ -169,6 +169,13 @@ struct remote_list
     struct remote_entry *array[CONNECTION_LIST_SIZE];
 };
 
+enum vlan_acceptable_frames
+{
+    VLAN_ONLY_TAGGED,
+    VLAN_ONLY_UNTAGGED_OR_PRIORITY,
+    VLAN_ALL,
+};
+
 struct remote_host_store
 {
 #define RH_HOST_LEN 80
@@ -181,6 +188,7 @@ enum genkey_type {
     GENKEY_SECRET,
     GENKEY_TLS_CRYPTV2_CLIENT,
     GENKEY_TLS_CRYPTV2_SERVER,
+    GENKEY_AUTH_TOKEN
 };
 
 /* Command line options */
@@ -214,8 +222,8 @@ struct options
     bool show_curves;
     bool genkey;
     enum genkey_type genkey_type;
-    const char* genkey_filename;
-    const char* genkey_extra_data;
+    const char *genkey_filename;
+    const char *genkey_extra_data;
 
     /* Networking parms */
     int connect_retry_max;
@@ -254,9 +262,7 @@ struct options
 
     int proto_force;
 
-#ifdef ENABLE_OCC
     bool mtu_test;
-#endif
 
 #ifdef ENABLE_MEMSTATS
     char *memstats_fn;
@@ -344,6 +350,7 @@ struct options
 
     /* mark value */
     int mark;
+    char *bind_dev;
 
     /* socket flags */
     unsigned int sockflags;
@@ -367,10 +374,8 @@ struct options
     struct client_nat_option_list *client_nat;
     bool enable_nat_ftp_support;
 
-#ifdef ENABLE_OCC
     /* Enable options consistency check between peers */
     bool occ;
-#endif
 
 #ifdef ENABLE_MANAGEMENT
     const char *management_addr;
@@ -397,7 +402,6 @@ struct options
 
 #if P2MP
 
-#if P2MP_SERVER
     /* the tmp dir is for now only used in the P2P server context */
     const char *tmp_dir;
     bool server_defined;
@@ -469,13 +473,17 @@ struct options
     const char *auth_user_pass_verify_script;
     bool auth_user_pass_verify_script_via_file;
     bool auth_token_generate;
-    unsigned int auth_token_lifetime;
+    bool auth_token_gen_secret_file;
+    bool auth_token_call_auth;
+    int auth_token_lifetime;
+    const char *auth_token_secret_file;
+    bool auth_token_secret_file_inline;
+
 #if PORT_SHARE
     char *port_share_host;
     char *port_share_port;
     const char *port_share_journal_dir;
 #endif
-#endif /* if P2MP_SERVER */
 
     bool client;
     bool pull; /* client pull of config options from server */
@@ -493,7 +501,7 @@ struct options
 
     /* Cipher parms */
     const char *shared_secret_file;
-    const char *shared_secret_file_inline;
+    bool shared_secret_file_inline;
     int key_direction;
     const char *ciphername;
     bool ncp_enabled;
@@ -517,14 +525,21 @@ struct options
     bool tls_server;
     bool tls_client;
     const char *ca_file;
+    bool ca_file_inline;
     const char *ca_path;
     const char *dh_file;
+    bool dh_file_inline;
     const char *cert_file;
+    bool cert_file_inline;
     const char *extra_certs_file;
+    bool extra_certs_file_inline;
     const char *priv_key_file;
+    bool priv_key_file_inline;
     const char *pkcs12_file;
+    bool pkcs12_file_inline;
     const char *cipher_list;
     const char *cipher_list_tls13;
+    const char *tls_groups;
     const char *tls_cert_profile;
     const char *ecdh_curve;
     const char *tls_verify;
@@ -532,14 +547,7 @@ struct options
     const char *verify_x509_name;
     const char *tls_export_cert;
     const char *crl_file;
-
-    const char *ca_file_inline;
-    const char *cert_file_inline;
-    const char *extra_certs_file_inline;
-    const char *crl_file_inline;
-    char *priv_key_file_inline;
-    const char *dh_file_inline;
-    const char *pkcs12_file_inline; /* contains the base64 encoding of pkcs12 file */
+    bool crl_file_inline;
 
     int ns_cert_type; /* set to 0, NS_CERT_CHECK_SERVER, or NS_CERT_CHECK_CLIENT */
     unsigned remote_cert_ku[MAX_PARMS];
@@ -561,10 +569,6 @@ struct options
 #ifdef ENABLE_CRYPTOAPI
     const char *cryptoapi_cert;
 #endif
-
-    /* data channel key exchange method */
-    int key_method;
-
     /* Per-packet timeout on control channel */
     int tls_timeout;
 
@@ -588,16 +592,16 @@ struct options
 
     /* Shared secret used for TLS control channel authentication */
     const char *tls_auth_file;
-    const char *tls_auth_file_inline;
+    bool tls_auth_file_inline;
 
     /* Shared secret used for TLS control channel authenticated encryption */
     const char *tls_crypt_file;
-    const char *tls_crypt_inline;
+    bool tls_crypt_file_inline;
 
     /* Client-specific secret or server key used for TLS control channel
      * authenticated encryption v2 */
     const char *tls_crypt_v2_file;
-    const char *tls_crypt_v2_inline;
+    bool tls_crypt_v2_file_inline;
 
     const char *tls_crypt_v2_metadata;
 
@@ -622,16 +626,21 @@ struct options
     bool show_net_up;
     int route_method;
     bool block_outside_dns;
+    enum windows_driver_type windows_driver;
 #endif
 
     bool use_peer_id;
     uint32_t peer_id;
 
-#if defined(ENABLE_CRYPTO_OPENSSL) && OPENSSL_VERSION_NUMBER >= 0x10001000
+#ifdef HAVE_EXPORT_KEYING_MATERIAL
     /* Keying Material Exporters [RFC 5705] */
     const char *keying_material_exporter_label;
     int keying_material_exporter_length;
 #endif
+
+    bool vlan_tagging;
+    enum vlan_acceptable_frames vlan_accept;
+    uint16_t vlan_pvid;
 
     struct pull_filter_list *pull_filter_list;
 
@@ -662,7 +671,7 @@ struct options
 #define OPT_P_MTU             (1<<14) /* TODO */
 #define OPT_P_NICE            (1<<15)
 #define OPT_P_PUSH            (1<<16)
-#define OPT_P_INSTANCE        (1<<17)
+#define OPT_P_INSTANCE        (1<<17) /**< allowed in ccd, client-connect etc*/
 #define OPT_P_CONFIG          (1<<18)
 #define OPT_P_EXPLICIT_NOTIFY (1<<19)
 #define OPT_P_ECHO            (1<<20)
@@ -674,14 +683,13 @@ struct options
 #define OPT_P_SOCKFLAGS       (1<<26)
 #define OPT_P_CONNECTION      (1<<27)
 #define OPT_P_PEER_ID         (1<<28)
+#define OPT_P_INLINE          (1<<29)
 
 #define OPT_P_DEFAULT   (~(OPT_P_INSTANCE|OPT_P_PULL_MODE))
 
 #if P2MP
 #define PULL_DEFINED(opt) ((opt)->pull)
-#if P2MP_SERVER
 #define PUSH_DEFINED(opt) ((opt)->push_list)
-#endif
 #endif
 
 #ifndef PULL_DEFINED
@@ -745,8 +753,6 @@ void show_settings(const struct options *o);
 
 bool string_defined_equal(const char *s1, const char *s2);
 
-#ifdef ENABLE_OCC
-
 const char *options_string_version(const char *s, struct gc_arena *gc);
 
 char *options_string(const struct options *o,
@@ -763,8 +769,6 @@ void options_warning_safe(char *actual, const char *expected, size_t actual_n);
 bool options_cmp_equal(char *actual, const char *expected);
 
 void options_warning(char *actual, const char *expected);
-
-#endif
 
 /**
  * Given an OpenVPN options string, extract the value of an option.

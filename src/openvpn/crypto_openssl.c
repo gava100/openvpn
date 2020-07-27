@@ -43,6 +43,7 @@
 #include "crypto_backend.h"
 #include "openssl_compat.h"
 
+#include <openssl/conf.h>
 #include <openssl/des.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -63,6 +64,7 @@
 #endif
 
 #if HAVE_OPENSSL_ENGINE
+#include <openssl/ui.h>
 #include <openssl/engine.h>
 
 static bool engine_initialized = false; /* GLOBAL */
@@ -148,6 +150,11 @@ crypto_init_lib_engine(const char *engine_name)
 void
 crypto_init_lib(void)
 {
+#if (OPENSSL_VERSION_NUMBER >= 0x10100000L)
+    OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, NULL);
+#else
+    OPENSSL_config(NULL);
+#endif
     /*
      * If you build the OpenSSL library and OpenVPN with
      * CRYPTO_MDEBUG, you will get a listing of OpenSSL
@@ -266,12 +273,7 @@ cipher_name_cmp(const void *a, const void *b)
     const EVP_CIPHER *const *cipher_a = a;
     const EVP_CIPHER *const *cipher_b = b;
 
-    const char *cipher_name_a =
-        translate_cipher_name_to_openvpn(EVP_CIPHER_name(*cipher_a));
-    const char *cipher_name_b =
-        translate_cipher_name_to_openvpn(EVP_CIPHER_name(*cipher_b));
-
-    return strcmp(cipher_name_a, cipher_name_b);
+    return strcmp(cipher_kt_name(*cipher_a), cipher_kt_name(*cipher_b));
 }
 
 void
@@ -299,9 +301,7 @@ show_available_ciphers(void)
 #ifdef ENABLE_OFB_CFB_MODE
                        || cipher_kt_mode_ofb_cfb(cipher)
 #endif
-#ifdef HAVE_AEAD_CIPHER_MODES
                        || cipher_kt_mode_aead(cipher)
-#endif
                        ))
         {
             cipher_list[num_ciphers++] = cipher;
@@ -313,7 +313,8 @@ show_available_ciphers(void)
         }
     }
 
-    qsort(cipher_list, num_ciphers, sizeof(*cipher_list), cipher_name_cmp);
+    /* cast to non-const to prevent warning */
+    qsort((EVP_CIPHER *)cipher_list, num_ciphers, sizeof(*cipher_list), cipher_name_cmp);
 
     for (i = 0; i < num_ciphers; i++)
     {
@@ -400,9 +401,8 @@ crypto_pem_encode(const char *name, struct buffer *dst,
     BUF_MEM *bptr;
     BIO_get_mem_ptr(bio, &bptr);
 
-    *dst = alloc_buf_gc(bptr->length + 1, gc);
+    *dst = alloc_buf_gc(bptr->length, gc);
     ASSERT(buf_write(dst, bptr->data, bptr->length));
-    buf_null_terminate(dst);
 
     ret = true;
 cleanup:
@@ -586,6 +586,7 @@ cipher_kt_get(const char *ciphername)
 
     ASSERT(ciphername);
 
+    ciphername = translate_cipher_name_from_openvpn(ciphername);
     cipher = EVP_get_cipherbyname(ciphername);
 
     if (NULL == cipher)
@@ -614,7 +615,9 @@ cipher_kt_name(const EVP_CIPHER *cipher_kt)
     {
         return "[null-cipher]";
     }
-    return EVP_CIPHER_name(cipher_kt);
+
+    const char *name = EVP_CIPHER_name(cipher_kt);
+    return translate_cipher_name_to_openvpn(name);
 }
 
 int
@@ -645,7 +648,7 @@ cipher_kt_block_size(const EVP_CIPHER *cipher)
 
     int block_size = EVP_CIPHER_block_size(cipher);
 
-    orig_name = cipher_kt_name(cipher);
+    orig_name = EVP_CIPHER_name(cipher);
     if (!orig_name)
     {
         goto cleanup;
@@ -705,11 +708,8 @@ bool
 cipher_kt_mode_cbc(const cipher_kt_t *cipher)
 {
     return cipher && cipher_kt_mode(cipher) == OPENVPN_MODE_CBC
-#ifdef EVP_CIPH_FLAG_AEAD_CIPHER
            /* Exclude AEAD cipher modes, they require a different API */
-           && !(EVP_CIPHER_flags(cipher) & EVP_CIPH_FLAG_AEAD_CIPHER)
-#endif
-    ;
+           && !(EVP_CIPHER_flags(cipher) & EVP_CIPH_FLAG_AEAD_CIPHER);
 }
 
 bool
@@ -717,17 +717,13 @@ cipher_kt_mode_ofb_cfb(const cipher_kt_t *cipher)
 {
     return cipher && (cipher_kt_mode(cipher) == OPENVPN_MODE_OFB
                       || cipher_kt_mode(cipher) == OPENVPN_MODE_CFB)
-#ifdef EVP_CIPH_FLAG_AEAD_CIPHER
            /* Exclude AEAD cipher modes, they require a different API */
-           && !(EVP_CIPHER_flags(cipher) & EVP_CIPH_FLAG_AEAD_CIPHER)
-#endif
-    ;
+           && !(EVP_CIPHER_flags(cipher) & EVP_CIPH_FLAG_AEAD_CIPHER);
 }
 
 bool
 cipher_kt_mode_aead(const cipher_kt_t *cipher)
 {
-#ifdef HAVE_AEAD_CIPHER_MODES
     if (cipher)
     {
         switch (EVP_CIPHER_nid(cipher))
@@ -741,7 +737,6 @@ cipher_kt_mode_aead(const cipher_kt_t *cipher)
                 return true;
         }
     }
-#endif
 
     return false;
 }
@@ -772,7 +767,7 @@ cipher_ctx_init(EVP_CIPHER_CTX *ctx, const uint8_t *key, int key_len,
 {
     ASSERT(NULL != kt && NULL != ctx);
 
-    EVP_CIPHER_CTX_init(ctx);
+    EVP_CIPHER_CTX_reset(ctx);
     if (!EVP_CipherInit(ctx, kt, NULL, NULL, enc))
     {
         crypto_msg(M_FATAL, "EVP cipher init #1");
@@ -792,12 +787,6 @@ cipher_ctx_init(EVP_CIPHER_CTX *ctx, const uint8_t *key, int key_len,
     ASSERT(EVP_CIPHER_CTX_key_length(ctx) <= key_len);
 }
 
-void
-cipher_ctx_cleanup(EVP_CIPHER_CTX *ctx)
-{
-    EVP_CIPHER_CTX_cleanup(ctx);
-}
-
 int
 cipher_ctx_iv_length(const EVP_CIPHER_CTX *ctx)
 {
@@ -807,11 +796,7 @@ cipher_ctx_iv_length(const EVP_CIPHER_CTX *ctx)
 int
 cipher_ctx_get_tag(EVP_CIPHER_CTX *ctx, uint8_t *tag_buf, int tag_size)
 {
-#ifdef HAVE_AEAD_CIPHER_MODES
     return EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, tag_size, tag_buf);
-#else
-    ASSERT(0);
-#endif
 }
 
 int
@@ -842,16 +827,12 @@ cipher_ctx_reset(EVP_CIPHER_CTX *ctx, const uint8_t *iv_buf)
 int
 cipher_ctx_update_ad(EVP_CIPHER_CTX *ctx, const uint8_t *src, int src_len)
 {
-#ifdef HAVE_AEAD_CIPHER_MODES
     int len;
     if (!EVP_CipherUpdate(ctx, NULL, &len, src, src_len))
     {
         crypto_msg(M_FATAL, "%s: EVP_CipherUpdate() failed", __func__);
     }
     return 1;
-#else  /* ifdef HAVE_AEAD_CIPHER_MODES */
-    ASSERT(0);
-#endif
 }
 
 int
@@ -875,7 +856,6 @@ int
 cipher_ctx_final_check_tag(EVP_CIPHER_CTX *ctx, uint8_t *dst, int *dst_len,
                            uint8_t *tag, size_t tag_len)
 {
-#ifdef HAVE_AEAD_CIPHER_MODES
     ASSERT(tag_len < SIZE_MAX);
     if (!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, tag_len, tag))
     {
@@ -883,9 +863,6 @@ cipher_ctx_final_check_tag(EVP_CIPHER_CTX *ctx, uint8_t *dst, int *dst_len,
     }
 
     return cipher_ctx_final(ctx, dst, dst_len);
-#else  /* ifdef HAVE_AEAD_CIPHER_MODES */
-    ASSERT(0);
-#endif
 }
 
 void
@@ -936,10 +913,10 @@ md_kt_name(const EVP_MD *kt)
     return EVP_MD_name(kt);
 }
 
-int
+unsigned char
 md_kt_size(const EVP_MD *kt)
 {
-    return EVP_MD_size(kt);
+    return (unsigned char)EVP_MD_size(kt);
 }
 
 
@@ -1070,6 +1047,72 @@ hmac_ctx_final(HMAC_CTX *ctx, uint8_t *dst)
     unsigned int in_hmac_len = 0;
 
     HMAC_Final(ctx, dst, &in_hmac_len);
+}
+
+int
+memcmp_constant_time(const void *a, const void *b, size_t size)
+{
+    return CRYPTO_memcmp(a, b, size);
+}
+
+#if HAVE_OPENSSL_ENGINE
+static int
+ui_reader(UI *ui, UI_STRING *uis)
+{
+    SSL_CTX *ctx = UI_get0_user_data(ui);
+
+    if (UI_get_string_type(uis) == UIT_PROMPT)
+    {
+        pem_password_cb *cb = SSL_CTX_get_default_passwd_cb(ctx);
+        void *d = SSL_CTX_get_default_passwd_cb_userdata(ctx);
+        char password[64];
+
+        cb(password, sizeof(password), 0, d);
+        UI_set_result(ui, uis, password);
+
+        return 1;
+    }
+    return 0;
+}
+#endif
+
+EVP_PKEY *
+engine_load_key(const char *file, SSL_CTX *ctx)
+{
+#if HAVE_OPENSSL_ENGINE
+    UI_METHOD *ui;
+    EVP_PKEY *pkey;
+
+    if (!engine_persist)
+    {
+        return NULL;
+    }
+
+    /* this will print out the error from BIO_read */
+    crypto_msg(M_INFO, "PEM_read_bio failed, now trying engine method to load private key");
+
+    ui = UI_create_method("openvpn");
+    if (!ui)
+    {
+        crypto_msg(M_FATAL, "Engine UI creation failed");
+        return NULL;
+    }
+
+    UI_method_set_reader(ui, ui_reader);
+
+    ENGINE_init(engine_persist);
+    pkey = ENGINE_load_private_key(engine_persist, file, ui, ctx);
+    ENGINE_finish(engine_persist);
+    if (!pkey)
+    {
+        crypto_msg(M_FATAL, "Engine could not load key file");
+    }
+
+    UI_destroy_method(ui);
+    return pkey;
+#else  /* if HAVE_OPENSSL_ENGINE */
+    return NULL;
+#endif /* if HAVE_OPENSSL_ENGINE */
 }
 
 #endif /* ENABLE_CRYPTO_OPENSSL */

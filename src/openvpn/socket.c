@@ -1138,6 +1138,18 @@ create_socket(struct link_socket *sock, struct addrinfo *addr)
     /* set socket to --mark packets with given value */
     socket_set_mark(sock->sd, sock->mark);
 
+#if defined(TARGET_LINUX)
+    if (sock->bind_dev)
+    {
+        msg (M_INFO, "Using bind-dev %s", sock->bind_dev);
+        if (setsockopt (sock->sd, SOL_SOCKET, SO_BINDTODEVICE, sock->bind_dev, strlen (sock->bind_dev) + 1) != 0)
+        {
+            msg(M_WARN|M_ERRNO, "WARN: setsockopt SO_BINDTODEVICE=%s failed", sock->bind_dev);
+        }
+
+    }
+#endif
+
     bind_local(sock, addr->ai_family);
 }
 
@@ -1175,7 +1187,7 @@ socket_do_listen(socket_descriptor_t sd,
         ASSERT(local);
         msg(M_INFO, "Listening for incoming TCP connection on %s",
             print_sockaddr(local->ai_addr, &gc));
-        if (listen(sd, 1))
+        if (listen(sd, 32))
         {
             msg(M_ERR, "TCP: listen() failed");
         }
@@ -1880,6 +1892,7 @@ link_socket_init_phase1(struct link_socket *sock,
                         int rcvbuf,
                         int sndbuf,
                         int mark,
+                        const char *bind_dev,
                         struct event_timeout *server_poll_timeout,
                         unsigned int sockflags)
 {
@@ -1906,6 +1919,7 @@ link_socket_init_phase1(struct link_socket *sock,
 
     sock->sockflags = sockflags;
     sock->mark = mark;
+    sock->bind_dev = bind_dev;
 
     sock->info.proto = proto;
     sock->info.af = af;
@@ -2471,7 +2485,7 @@ link_socket_connection_initiated(const struct buffer *buf,
         {
             msg(M_WARN, "WARNING: ipchange plugin call failed");
         }
-        argv_reset(&argv);
+        argv_free(&argv);
     }
 
     /* Process --ipchange option */
@@ -2481,7 +2495,7 @@ link_socket_connection_initiated(const struct buffer *buf,
         setenv_str(es, "script_type", "ipchange");
         ipchange_fmt(true, &argv, info, &gc);
         openvpn_run_script(&argv, es, 0, "--ipchange");
-        argv_reset(&argv);
+        argv_free(&argv);
     }
 
     gc_free(&gc);

@@ -13,6 +13,72 @@ ChaCha20-Poly1305 cipher support
     Added support for using the ChaCha20-Poly1305 cipher in the OpenVPN data
     channel.
 
+Improved Data channel cipher negotiation
+    The option ``ncp-ciphers`` has been renamed to ``data-ciphers``.
+    The old name is still accepted. The change in name signals that
+    ``data-ciphers`` is the preferred way to configure data channel
+    ciphers and the data prefix is chosen to avoid the ambiguity that
+    exists with ``--cipher`` for the data cipher and ``tls-cipher``
+    for the TLS ciphers.
+
+    OpenVPN clients will now signal all supported ciphers from the
+    ``data-ciphers`` option to the server via ``IV_CIPHERS``. OpenVPN
+    servers will select the first common cipher from the ``data-ciphers``
+    list instead of blindly pushing the first cipher of the list. This
+    allows to use a configuration like
+    ``data-ciphers ChaCha20-Poly1305:AES-256-GCM`` on the server that
+    prefers ChaCha20-Poly1305 but uses it only if the client supports it.
+
+Asynchronous (deferred) authentication support for auth-pam plugin.
+    See src/plugins/auth-pam/README.auth-pam for details.
+
+Faster connection setup
+    A client will signal in the ``IV_PROTO`` variable that it is in pull
+    mode. This allows the server to push the configuration options to
+    the client without waiting for a ``PULL_REQUEST`` message. The feature
+    is automatically enabled if both client and server support it and
+    significantly reduces the connection setup time by avoiding one
+    extra packet round-trip and 1s of internal event delays.
+
+Deprecated features
+-------------------
+For an up-to-date list of all deprecated options, see this wiki page:
+https://community.openvpn.net/openvpn/wiki/DeprecatedOptions
+
+- ``ncp-disable`` has been deprecated
+    With the improved and matured data channel cipher negotiation, the use
+    of ``ncp-disable`` should not be necessary anymore.
+
+- ``inetd`` has been deprecated
+  This is a very limited and not-well-tested way to run OpenVPN, on TCP
+  and TAP mode only, which complicates the code quite a bit for little gain.
+  To be removed in OpenVPN 2.6 (unless users protest).
+
+- ``no-iv`` has been removed
+  This option was made into a NOOP option with OpenVPN 2.4.  This has now
+  been completely removed.
+
+- ``--client-cert-not-required`` has been removed
+  This option will now cause server configurations to not start.  Use
+  ``--verify-client-cert none`` instead.
+
+- ``--ifconfig-pool-linear`` has been removed
+  This option is removed.  Use ``--topology p2p`` instead.
+
+User-visible Changes
+--------------------
+- If multiple connect handlers are used (client-connect, ccd, connect
+  plugin) and one of the handler succeeds but a subsequent fails, the
+  client-disconnect-script is now called immediately. Previously it
+  was called, when the VPN session was terminated.
+
+- Support for building with OpenSSL 1.0.1 has been removed. The minimum
+  supported OpenSSL version is now 1.0.2.
+
+- The GET_CONFIG management state is omitted if the server pushes
+  the client configuration almost immediately as result of the
+  faster connection setup feature.
+
 
 Overview of changes in 2.4
 ==========================

@@ -46,28 +46,6 @@ process_signal_p2p(struct context *c)
     return process_signal(c);
 }
 
-/* Write our PID to a file */
-static void
-write_pid(const char *filename)
-{
-    if (filename)
-    {
-        unsigned int pid = 0;
-        FILE *fp = platform_fopen(filename, "w");
-        if (!fp)
-        {
-            msg(M_ERR, "Open error on pid file %s", filename);
-        }
-
-        pid = platform_getpid();
-        fprintf(fp, "%u\n", pid);
-        if (fclose(fp))
-        {
-            msg(M_ERR, "Close error on pid file %s", filename);
-        }
-    }
-}
-
 
 /**************************************************************************/
 /**
@@ -274,7 +252,7 @@ openvpn_main(int argc, char *argv[])
             if (c.first_time)
             {
                 c.did_we_daemonize = possibly_become_daemon(&c.options);
-                write_pid(c.options.writepid);
+                write_pid_file(c.options.writepid, c.options.chroot_dir);
             }
 
 #ifdef ENABLE_MANAGEMENT
@@ -305,12 +283,10 @@ openvpn_main(int argc, char *argv[])
                         tunnel_point_to_point(&c);
                         break;
 
-#if P2MP_SERVER
                     case MODE_SERVER:
                         tunnel_server(&c);
                         break;
 
-#endif
                     default:
                         ASSERT(0);
                 }
@@ -332,6 +308,7 @@ openvpn_main(int argc, char *argv[])
             env_set_destroy(c.es);
             uninit_options(&c.options);
             gc_reset(&c.gc);
+            net_ctx_free(&c.net_ctx);
         }
         while (c.sig->signal_received == SIGHUP);
     }

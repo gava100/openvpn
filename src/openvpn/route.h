@@ -184,7 +184,11 @@ struct route_ipv6_gateway_info {
 #ifdef _WIN32
     DWORD adapter_index; /* interface or ~0 if undefined */
 #else
-    char iface[16]; /* interface name (null terminated), may be empty */
+    /* non linux platform don't have this constant defined */
+#ifndef IFNAMSIZ
+#define IFNAMSIZ 16
+#endif
+    char iface[IFNAMSIZ]; /* interface name (null terminated), may be empty */
 #endif
 
     /* gateway interface hardware address */
@@ -316,8 +320,6 @@ void delete_routes(struct route_list *rl,
 void setenv_routes(struct env_set *es, const struct route_list *rl);
 
 void setenv_routes_ipv6(struct env_set *es, const struct route_ipv6_list *rl6);
-
-
 
 bool is_special_addr(const char *addr_str);
 
