@@ -592,7 +592,7 @@ tcp_checksum (const uint8_t *buf,
 }
 
 static uint16_t 
-ip_checksum(const void *buf, uint16_t hdr_len) {
+local_ip_checksum(const void *buf, uint16_t hdr_len) {
     unsigned long sum = 0;
     const uint16_t *ip1;
 
@@ -766,7 +766,7 @@ client_nat_ftp_transform(struct buffer *ipbuf,
             // Readjust IP Checksum
             uint16_t head_len = OPENVPN_IPH_GET_LEN(hdr->ip.version_len);
             hdr->ip.check = 0;
-            uint16_t check = ip_checksum( BPTR (ipbuf), head_len);
+            uint16_t check = local_ip_checksum( BPTR (ipbuf), head_len);
             hdr->ip.check = check;
 
             //Use new_len here!
