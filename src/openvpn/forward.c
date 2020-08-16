@@ -78,30 +78,12 @@ show_wait_status(struct context *c)
 #endif /* ifdef ENABLE_DEBUG */
 
 /*
- * Does TLS session need service?
- */
-static inline void
-check_tls(struct context *c)
-{
-    void check_tls_dowork(struct context *c);
-
-    if (c->c2.tls_multi)
-    {
-        check_tls_dowork(c);
-    }
-}
-
-/*
  * TLS errors are fatal in TCP mode.
  * Also check for --tls-exit trigger.
  */
 static inline void
 check_tls_errors(struct context *c)
 {
-    void check_tls_errors_co(struct context *c);
-
-    void check_tls_errors_nco(struct context *c);
-
     if (c->c2.tls_multi && c->c2.tls_exit_signal)
     {
         if (link_socket_connection_oriented(c->c2.link_socket))
@@ -118,148 +100,6 @@ check_tls_errors(struct context *c)
                 check_tls_errors_nco(c);
             }
         }
-    }
-}
-
-/*
- * Check for possible incoming configuration
- * messages on the control channel.
- */
-static inline void
-check_incoming_control_channel(struct context *c)
-{
-#if P2MP
-    void check_incoming_control_channel_dowork(struct context *c);
-
-    if (tls_test_payload_len(c->c2.tls_multi) > 0)
-    {
-        check_incoming_control_channel_dowork(c);
-    }
-#endif
-}
-
-/*
- * Should we add routes?
- */
-static inline void
-check_add_routes(struct context *c)
-{
-    void check_add_routes_dowork(struct context *c);
-
-    if (event_timeout_trigger(&c->c2.route_wakeup, &c->c2.timeval, ETT_DEFAULT))
-    {
-        check_add_routes_dowork(c);
-    }
-}
-
-/*
- * Should we exit due to inactivity timeout?
- */
-static inline void
-check_inactivity_timeout(struct context *c)
-{
-    void check_inactivity_timeout_dowork(struct context *c);
-
-    if (c->options.inactivity_timeout
-        && event_timeout_trigger(&c->c2.inactivity_interval, &c->c2.timeval, ETT_DEFAULT))
-    {
-        check_inactivity_timeout_dowork(c);
-    }
-}
-
-#if P2MP
-
-static inline void
-check_server_poll_timeout(struct context *c)
-{
-    void check_server_poll_timeout_dowork(struct context *c);
-
-    if (c->options.ce.connect_timeout
-        && event_timeout_trigger(&c->c2.server_poll_interval, &c->c2.timeval, ETT_DEFAULT))
-    {
-        check_server_poll_timeout_dowork(c);
-    }
-}
-
-/*
- * Scheduled exit?
- */
-static inline void
-check_scheduled_exit(struct context *c)
-{
-    void check_scheduled_exit_dowork(struct context *c);
-
-    if (event_timeout_defined(&c->c2.scheduled_exit))
-    {
-        if (event_timeout_trigger(&c->c2.scheduled_exit, &c->c2.timeval, ETT_DEFAULT))
-        {
-            check_scheduled_exit_dowork(c);
-        }
-    }
-}
-#endif /* if P2MP */
-
-/*
- * Should we write timer-triggered status file.
- */
-static inline void
-check_status_file(struct context *c)
-{
-    void check_status_file_dowork(struct context *c);
-
-    if (c->c1.status_output)
-    {
-        if (status_trigger_tv(c->c1.status_output, &c->c2.timeval))
-        {
-            check_status_file_dowork(c);
-        }
-    }
-}
-
-#ifdef ENABLE_FRAGMENT
-/*
- * Should we deliver a datagram fragment to remote?
- */
-static inline void
-check_fragment(struct context *c)
-{
-    void check_fragment_dowork(struct context *c);
-
-    if (c->c2.fragment)
-    {
-        check_fragment_dowork(c);
-    }
-}
-#endif
-
-#if P2MP
-
-/*
- * see if we should send a push_request in response to --pull
- */
-static inline void
-check_push_request(struct context *c)
-{
-    void check_push_request_dowork(struct context *c);
-
-    if (event_timeout_trigger(&c->c2.push_request_interval, &c->c2.timeval, ETT_DEFAULT))
-    {
-        check_push_request_dowork(c);
-    }
-}
-
-#endif
-
-/*
- * Should we persist our anti-replay packet ID state to disk?
- */
-static inline void
-check_packet_id_persist_flush(struct context *c)
-{
-    if (packet_id_persist_enabled(&c->c1.pid_persist)
-        && event_timeout_trigger(&c->c2.packet_id_persist_interval, &c->c2.timeval, ETT_DEFAULT))
-    {
-        packet_id_persist_save(&c->c1.pid_persist);
     }
 }
 
@@ -299,7 +139,7 @@ context_reschedule_sec(struct context *c, int sec)
  *
  */
 void
-check_tls_dowork(struct context *c)
+check_tls(struct context *c)
 {
     interval_t wakeup = BIG_TIMEOUT;
 
@@ -349,68 +189,68 @@ check_tls_errors_nco(struct context *c)
  * messages on the control channel.
  */
 void
-check_incoming_control_channel_dowork(struct context *c)
+check_incoming_control_channel(struct context *c)
 {
-    const int len = tls_test_payload_len(c->c2.tls_multi);
-    if (len)
+    int len = tls_test_payload_len(c->c2.tls_multi);
+    /* We should only be called with len >0 */
+    ASSERT(len > 0);
+
+    struct gc_arena gc = gc_new();
+    struct buffer buf = alloc_buf_gc(len, &gc);
+    if (tls_rec_payload(c->c2.tls_multi, &buf))
     {
-        struct gc_arena gc = gc_new();
-        struct buffer buf = alloc_buf_gc(len, &gc);
-        if (tls_rec_payload(c->c2.tls_multi, &buf))
+        /* force null termination of message */
+        buf_null_terminate(&buf);
+
+        /* enforce character class restrictions */
+        string_mod(BSTR(&buf), CC_PRINT, CC_CRLF, 0);
+
+        if (buf_string_match_head_str(&buf, "AUTH_FAILED"))
         {
-            /* force null termination of message */
-            buf_null_terminate(&buf);
-
-            /* enforce character class restrictions */
-            string_mod(BSTR(&buf), CC_PRINT, CC_CRLF, 0);
-
-            if (buf_string_match_head_str(&buf, "AUTH_FAILED"))
-            {
-                receive_auth_failed(c, &buf);
-            }
-            else if (buf_string_match_head_str(&buf, "PUSH_"))
-            {
-                incoming_push_message(c, &buf);
-            }
-            else if (buf_string_match_head_str(&buf, "RESTART"))
-            {
-                server_pushed_signal(c, &buf, true, 7);
-            }
-            else if (buf_string_match_head_str(&buf, "HALT"))
-            {
-                server_pushed_signal(c, &buf, false, 4);
-            }
-            else if (buf_string_match_head_str(&buf, "INFO_PRE"))
-            {
-                server_pushed_info(c, &buf, 8);
-            }
-            else if (buf_string_match_head_str(&buf, "INFO"))
-            {
-                server_pushed_info(c, &buf, 4);
-            }
-            else if (buf_string_match_head_str(&buf, "CR_RESPONSE"))
-            {
-                receive_cr_response(c, &buf);
-            }
-            else
-            {
-                msg(D_PUSH_ERRORS, "WARNING: Received unknown control message: %s", BSTR(&buf));
-            }
+            receive_auth_failed(c, &buf);
+        }
+        else if (buf_string_match_head_str(&buf, "PUSH_"))
+        {
+            incoming_push_message(c, &buf);
+        }
+        else if (buf_string_match_head_str(&buf, "RESTART"))
+        {
+            server_pushed_signal(c, &buf, true, 7);
+        }
+        else if (buf_string_match_head_str(&buf, "HALT"))
+        {
+            server_pushed_signal(c, &buf, false, 4);
+        }
+        else if (buf_string_match_head_str(&buf, "INFO_PRE"))
+        {
+            server_pushed_info(c, &buf, 8);
+        }
+        else if (buf_string_match_head_str(&buf, "INFO"))
+        {
+            server_pushed_info(c, &buf, 4);
+        }
+        else if (buf_string_match_head_str(&buf, "CR_RESPONSE"))
+        {
+            receive_cr_response(c, &buf);
         }
         else
         {
-            msg(D_PUSH_ERRORS, "WARNING: Receive control message failed");
+            msg(D_PUSH_ERRORS, "WARNING: Received unknown control message: %s", BSTR(&buf));
         }
-
-        gc_free(&gc);
     }
+    else
+    {
+        msg(D_PUSH_ERRORS, "WARNING: Receive control message failed");
+    }
+
+    gc_free(&gc);
 }
 
 /*
  * Periodically resend PUSH_REQUEST until PUSH message received
  */
 void
-check_push_request_dowork(struct context *c)
+check_push_request(struct context *c)
 {
     send_push_request(c);
 
@@ -521,7 +361,7 @@ check_add_routes_action(struct context *c, const bool errors)
 }
 
 void
-check_add_routes_dowork(struct context *c)
+check_add_routes(struct context *c)
 {
     if (test_routes(c->c1.route_list, c->c1.tuntap))
     {
@@ -559,7 +399,7 @@ check_add_routes_dowork(struct context *c)
  * Should we exit due to inactivity timeout?
  */
 void
-check_inactivity_timeout_dowork(struct context *c)
+check_inactivity_timeout(struct context *c)
 {
     msg(M_INFO, "Inactivity timeout (--inactive), exiting");
     register_signal(c, SIGTERM, "inactive");
@@ -575,7 +415,7 @@ get_server_poll_remaining_time(struct event_timeout *server_poll_timeout)
 #if P2MP
 
 void
-check_server_poll_timeout_dowork(struct context *c)
+check_server_poll_timeout(struct context *c)
 {
     event_timeout_reset(&c->c2.server_poll_interval);
     ASSERT(c->c2.tls_multi);
@@ -605,7 +445,7 @@ schedule_exit(struct context *c, const int n_seconds, const int signal)
  * Scheduled exit?
  */
 void
-check_scheduled_exit_dowork(struct context *c)
+check_scheduled_exit(struct context *c)
 {
     register_signal(c, c->c2.scheduled_exit_signal, "delayed-exit");
 }
@@ -616,7 +456,7 @@ check_scheduled_exit_dowork(struct context *c)
  * Should we write timer-triggered status file.
  */
 void
-check_status_file_dowork(struct context *c)
+check_status_file(struct context *c)
 {
     if (c->c1.status_output)
     {
@@ -629,7 +469,7 @@ check_status_file_dowork(struct context *c)
  * Should we deliver a datagram fragment to remote?
  */
 void
-check_fragment_dowork(struct context *c)
+check_fragment(struct context *c)
 {
     struct link_socket_info *lsi = get_link_socket_info(c);
 
@@ -761,10 +601,18 @@ process_coarse_timers(struct context *c)
 {
     /* flush current packet-id to file once per 60
     * seconds if --replay-persist was specified */
-    check_packet_id_persist_flush(c);
+    if (packet_id_persist_enabled(&c->c1.pid_persist)
+        && event_timeout_trigger(&c->c2.packet_id_persist_interval, &c->c2.timeval, ETT_DEFAULT))
+    {
+        packet_id_persist_save(&c->c1.pid_persist);
+    }
 
-    /* should we update status file? */
-    check_status_file(c);
+    /* Should we write timer-triggered status file */
+    if (c->c1.status_output
+        && event_timeout_trigger(&c->c1.status_output->et, &c->c2.timeval, ETT_DEFAULT))
+    {
+        check_status_file(c);
+    }
 
     /* process connection establishment items */
     if (event_timeout_trigger(&c->c2.wait_for_connect, &c->c2.timeval, ETT_DEFAULT))
@@ -772,19 +620,34 @@ process_coarse_timers(struct context *c)
         check_connection_established(c);
     }
 #if P2MP
-    /* see if we should send a push_request in response to --pull */
-    check_push_request(c);
+    /* see if we should send a push_request (option --pull) */
+    if (event_timeout_trigger(&c->c2.push_request_interval, &c->c2.timeval, ETT_DEFAULT))
+    {
+        check_push_request(c);
+    }
 #endif
 
 #ifdef PLUGIN_PF
-    pf_check_reload(c);
+    if (c->c2.pf.enabled
+        && event_timeout_trigger(&c->c2.pf.reload, &c->c2.timeval, ETT_DEFAULT))
+    {
+        pf_check_reload(c);
+    }
 #endif
 
     /* process --route options */
-    check_add_routes(c);
+    if (event_timeout_trigger(&c->c2.route_wakeup, &c->c2.timeval, ETT_DEFAULT))
+    {
+        check_add_routes(c);
+    }
 
     /* possibly exit due to --inactive */
-    check_inactivity_timeout(c);
+    if (c->options.inactivity_timeout
+        && event_timeout_trigger(&c->c2.inactivity_interval, &c->c2.timeval, ETT_DEFAULT))
+    {
+        check_inactivity_timeout(c);
+    }
+
     if (c->sig->signal_received)
     {
         return;
@@ -800,13 +663,19 @@ process_coarse_timers(struct context *c)
 #if P2MP
     if (c->c2.tls_multi)
     {
-        check_server_poll_timeout(c);
+        if (c->options.ce.connect_timeout
+            && event_timeout_trigger(&c->c2.server_poll_interval, &c->c2.timeval, ETT_DEFAULT))
+        {
+            check_server_poll_timeout(c);
+        }
         if (c->sig->signal_received)
         {
             return;
         }
-
-        check_scheduled_exit(c);
+        if (event_timeout_trigger(&c->c2.scheduled_exit, &c->c2.timeval, ETT_DEFAULT))
+        {
+            check_scheduled_exit(c);
+        }
         if (c->sig->signal_received)
         {
             return;
@@ -831,8 +700,14 @@ process_coarse_timers(struct context *c)
 }
 
 static void
-check_coarse_timers_dowork(struct context *c)
+check_coarse_timers(struct context *c)
 {
+    if (now < c->c2.coarse_timer_wakeup)
+    {
+        context_reschedule_sec(c, c->c2.coarse_timer_wakeup - now);
+        return;
+    }
+
     const struct timeval save = c->c2.timeval;
     c->c2.timeval.tv_sec = BIG_TIMEOUT;
     c->c2.timeval.tv_usec = 0;
@@ -845,20 +720,6 @@ check_coarse_timers_dowork(struct context *c)
     if (c->c2.timeval.tv_sec > save.tv_sec)
     {
         c->c2.timeval = save;
-    }
-}
-
-static inline void
-check_coarse_timers(struct context *c)
-{
-    const time_t local_now = now;
-    if (local_now >= c->c2.coarse_timer_wakeup)
-    {
-        check_coarse_timers_dowork(c);
-    }
-    else
-    {
-        context_reschedule_sec(c, c->c2.coarse_timer_wakeup - local_now);
     }
 }
 
@@ -1177,9 +1038,9 @@ process_incoming_link_part2(struct context *c, struct link_socket_info *lsi, con
          *
          * Also, update the persisted version of our packet-id.
          */
-        if (!TLS_MODE(c))
+        if (!TLS_MODE(c) && c->c2.buf.len > 0)
         {
-            link_socket_set_outgoing_addr(&c->c2.buf, lsi, &c->c2.from, NULL, c->c2.es);
+            link_socket_set_outgoing_addr(lsi, &c->c2.from, NULL, c->c2.es);
         }
 
         /* reset packet received timer */
@@ -1967,8 +1828,11 @@ pre_select(struct context *c)
         return;
     }
 
-    /* Does TLS need service? */
-    check_tls(c);
+    /* If tls is enabled, do tls control channel packet processing. */
+    if (c->c2.tls_multi)
+    {
+        check_tls(c);
+    }
 
     /* In certain cases, TLS errors will require a restart */
     check_tls_errors(c);
@@ -1977,15 +1841,24 @@ pre_select(struct context *c)
         return;
     }
 
-    /* check for incoming configuration info on the control channel */
-    check_incoming_control_channel(c);
+#if P2MP
+    /* check for incoming control messages on the control channel like
+     * push request/reply, or authentication failure and 2FA messages */
+    if (tls_test_payload_len(c->c2.tls_multi) > 0)
+    {
+        check_incoming_control_channel(c);
+    }
+#endif
 
     /* Should we send an OCC message? */
     check_send_occ_msg(c);
 
 #ifdef ENABLE_FRAGMENT
     /* Should we deliver a datagram fragment to remote? */
-    check_fragment(c);
+    if (c->c2.fragment)
+    {
+        check_fragment(c);
+    }
 #endif
 
     /* Update random component of timeout */
