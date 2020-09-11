@@ -1038,6 +1038,29 @@ do_ifconfig_ipv6(struct tuntap *tt, const char *ifname, int tun_mtu,
     openvpn_execve_check(&argv, es, S_FATAL,
                          "generic BSD ifconfig inet6 failed");
 
+#if defined(TARGET_FREEBSD) && __FreeBSD_version >= 1200000
+    /* On FreeBSD 12 and up, there is ipv6_activate_all_interfaces="YES"
+     * in rc.conf, which is not set by default.  If it is *not* set,
+     * "all new interfaces that are not already up" are configured by
+     * devd + /etc/pccard_ether as "inet6 ifdisabled".
+     *
+     * The "is this interface already up?" test is a non-zero time window
+     * which we manage to hit with our ifconfig often enough to cause
+     * frequent fails in the openvpn test environment.
+     *
+     * Thus: assume that the system might interfere, wait for things to
+     * settle (it's a very short time window), and remove -ifdisable again.
+     *
+     * See: https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=248172
+     */
+    sleep(1);
+    argv_printf(&argv, "%s %s inet6 -ifdisabled", IFCONFIG_PATH, ifname);
+    argv_msg(M_INFO, &argv);
+
+    openvpn_execve_check(&argv, es, S_FATAL,
+                         "FreeBSD BSD 'ifconfig inet6 -ifdisabled' failed");
+#endif
+
 #if defined(TARGET_OPENBSD) || defined(TARGET_NETBSD) \
     || defined(TARGET_DARWIN)
     /* and, hooray, we explicitly need to add a route... */
@@ -1970,6 +1993,11 @@ open_tun(const char *dev, const char *dev_type, const char *dev_node, struct tun
 
 #ifdef ENABLE_FEATURE_TUN_PERSIST
 
+/* TUNSETGROUP appeared in 2.6.23 */
+#ifndef TUNSETGROUP
+# define TUNSETGROUP   _IOW('T', 206, int)
+#endif
+
 void
 tuncfg(const char *dev, const char *dev_type, const char *dev_node,
        int persist_mode, const char *username, const char *groupname,
@@ -2009,7 +2037,7 @@ tuncfg(const char *dev, const char *dev_type, const char *dev_node,
         }
         else if (ioctl(tt->fd, TUNSETGROUP, platform_state_group.gr->gr_gid) < 0)
         {
-            msg(M_ERR, "Cannot ioctl TUNSETOWNER(%s) %s", groupname, dev);
+            msg(M_ERR, "Cannot ioctl TUNSETGROUP(%s) %s", groupname, dev);
         }
     }
     close_tun(tt, ctx);
@@ -6158,12 +6186,32 @@ wintun_register_ring_buffer(struct tuntap *tt, const char *device_guid)
     }
     else
     {
-        msg(M_FATAL, "ERROR:  Wintun requires SYSTEM privileges and therefore "
-                     "should be used with interactive service. If you want to "
-                     "use openvpn from command line, you need to do SYSTEM "
-                     "elevation yourself (for example with psexec).");
-    }
+        if (!register_ring_buffers(tt->hand,
+                                   tt->wintun_send_ring,
+                                   tt->wintun_receive_ring,
+                                   tt->rw_handle.read,
+                                   tt->rw_handle.write))
+        {
+            switch (GetLastError())
+            {
+                case ERROR_ACCESS_DENIED:
+                    msg(M_FATAL, "ERROR:  Wintun requires SYSTEM privileges and therefore "
+                                 "should be used with interactive service. If you want to "
+                                 "use openvpn from command line, you need to do SYSTEM "
+                                 "elevation yourself (for example with psexec).");
+                    break;
 
+                case ERROR_ALREADY_INITIALIZED:
+                    msg(M_NONFATAL, "Adapter %s is already in use", device_guid);
+                    break;
+
+                default:
+                    msg(M_NONFATAL | M_ERRNO, "Failed to register ring buffers");
+            }
+            ret = false;
+        }
+
+    }
     return ret;
 }
 

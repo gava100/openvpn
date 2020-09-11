@@ -530,6 +530,14 @@ fast hardware. SSL/TLS authentication must be used in this mode.
   ``--client-config-dir`` configuration file. This option will ignore
   ``--push`` options at the global config file level.
 
+  *NOTE*: ``--push-reset`` is very thorough: it will remove almost
+  all options from the list of to-be-pushed options.  In many cases,
+  some of these options will need to be re-configured afterwards -
+  specifically, ``--topology subnet`` and ``--route-gateway`` will get
+  lost and this will break client configs in many cases.  Thus, for most
+  purposes, ``--push-remove`` is better suited to selectively remove
+  push options for individual clients.
+
 --server args
   A helper directive designed to simplify the configuration of OpenVPN's
   server mode. This directive will set up an OpenVPN server which will
@@ -630,6 +638,19 @@ fast hardware. SSL/TLS authentication must be used in this mode.
 
     mode server
     tls-server
+
+--server-ipv6 args
+  Convenience-function to enable a number of IPv6 related options at once,
+  namely ``--ifconfig-ipv6``, ``--ifconfig-ipv6-pool`` and
+  ``--push tun-ipv6``.
+
+  Valid syntax:
+  ::
+
+     server-ipv6 ipv6addr/bits
+
+  Pushing of the ``--tun-ipv6`` directive is done for older clients which
+  require an explicit ``--tun-ipv6`` in their configuration.
 
 --stale-routes-check args
   Remove routes which haven't had activity for ``n`` seconds (i.e. the ageing
