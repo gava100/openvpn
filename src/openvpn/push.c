@@ -219,7 +219,7 @@ receive_cr_response(struct context *c, const struct buffer *buffer)
     {
         m = BSTR(&buf);
     }
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
     struct tls_session *session = &c->c2.tls_multi->session[TM_ACTIVE];
     struct man_def_auth_context *mda = session->opt->mda_context;
     struct env_set *es = session->opt->es;
@@ -479,7 +479,10 @@ prepare_push_reply(struct context *c, struct gc_arena *gc,
     {
         push_option_fmt(gc, push_list, M_USAGE, "cipher %s", o->ciphername);
     }
-
+    if (o->data_channel_use_ekm)
+    {
+        push_option_fmt(gc, push_list, M_USAGE, "key-derivation tls-ekm");
+    }
     return true;
 }
 
@@ -733,7 +736,8 @@ process_incoming_push_request(struct context *c)
 {
     int ret = PUSH_MSG_ERROR;
 
-    if (tls_authentication_status(c->c2.tls_multi, 0) == TLS_AUTHENTICATION_FAILED || c->c2.context_auth == CAS_FAILED)
+    if ((c->c2.tls_multi && tls_authentication_status(c->c2.tls_multi, 0) == TLS_AUTHENTICATION_FAILED)
+        || c->c2.context_auth == CAS_FAILED)
     {
         const char *client_reason = tls_client_reason(c->c2.tls_multi);
         send_auth_failed(c, client_reason);

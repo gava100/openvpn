@@ -206,15 +206,13 @@ struct key_state
     enum ks_auth_state authenticated;
     time_t auth_deferred_expire;
 
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
     unsigned int mda_key_id;
     unsigned int mda_status;
 #endif
-#ifdef PLUGIN_DEF_AUTH
     unsigned int auth_control_status;
     time_t acf_last_mod;
     char *auth_control_file;
-#endif
 };
 
 /** Control channel wrapping (--tls-auth/--tls-crypt) context */
@@ -284,7 +282,11 @@ struct tls_options
     const char *remote_cert_eku;
     uint8_t *verify_hash;
     hash_algo_type verify_hash_algo;
-    char *x509_username_field;
+#ifdef ENABLE_X509ALTUSERNAME
+    char *x509_username_field[MAX_PARMS];
+#else
+    char *x509_username_field[2];
+#endif
 
     /* allow openvpn config info to be
      * passed over control channel */
@@ -349,7 +351,7 @@ struct tls_options
 #define SSLF_TLS_VERSION_MAX_MASK     0xF  /* (uses bit positions 10 to 13) */
     unsigned int ssl_flags;
 
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
     struct man_def_auth_context *mda_context;
 #endif
 
@@ -499,11 +501,6 @@ struct tls_multi
     /* const options and config info */
     struct tls_options opt;
 
-    struct key_state *key_scan[KEY_SCAN_SIZE];
-    /**< List of \c key_state objects in the
-     *   order they should be scanned by data
-     *   channel modules. */
-
     /*
      * used by tls_pre_encrypt to communicate the encrypt key
      * to tls_post_encrypt()
@@ -532,10 +529,8 @@ struct tls_multi
     char *locked_username;
     struct cert_hash_set *locked_cert_hash_set;
 
-#ifdef ENABLE_DEF_AUTH
     /* Time of last call to tls_authentication_status */
     time_t tas_last;
-#endif
 
     /*
      * An error message to send to client on AUTH_FAILED
@@ -584,5 +579,25 @@ struct tls_multi
      *   representing control channel
      *   sessions with the remote peer. */
 };
+
+/**  gets an item  of \c key_state objects in the
+ *   order they should be scanned by data
+ *   channel modules. */
+static inline struct key_state *
+get_key_scan(struct tls_multi *multi, int index)
+{
+    switch (index)
+    {
+        case 0:
+            return &multi->session[TM_ACTIVE].key[KS_PRIMARY];
+        case 1:
+            return &multi->session[TM_ACTIVE].key[KS_LAME_DUCK];
+        case 2:
+            return &multi->session[TM_LAME_DUCK].key[KS_LAME_DUCK];
+        default:
+            ASSERT(false);
+            return NULL; /* NOTREACHED */
+    }
+}
 
 #endif /* SSL_COMMON_H_ */

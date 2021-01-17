@@ -434,8 +434,6 @@ ssl_set_auth_nocache(void)
 {
     passbuf.nocache = true;
     auth_user_pass.nocache = true;
-    /* wait for push-reply, because auth-token may still need the username */
-    auth_user_pass.wait_for_push = true;
 }
 
 /*
@@ -764,6 +762,22 @@ state_name(int state)
 }
 
 static const char *
+ks_auth_name(enum ks_auth_state auth)
+{
+    switch (auth)
+    {
+        case KS_AUTH_TRUE:
+            return "KS_AUTH_TRUE";
+        case KS_AUTH_DEFERRED:
+            return "KS_AUTH_DEFERRED";
+        case KS_AUTH_FALSE:
+            return "KS_AUTH_FALSE";
+        default:
+            return "KS_????";
+    }
+}
+
+static const char *
 packet_opcode_name(int op)
 {
     switch (op)
@@ -832,9 +846,10 @@ print_key_id(struct tls_multi *multi, struct gc_arena *gc)
 
     for (int i = 0; i < KEY_SCAN_SIZE; ++i)
     {
-        struct key_state *ks = multi->key_scan[i];
-        buf_printf(&out, " [key#%d state=%s id=%d sid=%s]", i,
-                   state_name(ks->state), ks->key_id,
+        struct key_state *ks = get_key_scan(multi, i);
+        buf_printf(&out, " [key#%d state=%s auth=%s id=%d sid=%s]", i,
+                   state_name(ks->state), ks_auth_name(ks->authenticated),
+                   ks->key_id,
                    session_id_print(&ks->session_id_remote, gc));
     }
 
@@ -937,7 +952,7 @@ key_state_init(struct tls_session *session, struct key_state *ks)
 
     ks->crypto_options.pid_persist = NULL;
 
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
     ks->mda_key_id = session->opt->mda_context->mda_key_id_counter++;
 #endif
 }
@@ -969,27 +984,11 @@ key_state_free(struct key_state *ks, bool clear)
     free_buf(&ks->ack_write_buf);
     buffer_list_free(ks->paybuf);
 
-    if (ks->send_reliable)
-    {
-        reliable_free(ks->send_reliable);
-        free(ks->send_reliable);
-    }
+    reliable_free(ks->send_reliable);
+    reliable_free(ks->rec_reliable);
 
-    if (ks->rec_reliable)
-    {
-        reliable_free(ks->rec_reliable);
-        free(ks->rec_reliable);
-    }
-
-    if (ks->rec_ack)
-    {
-        free(ks->rec_ack);
-    }
-
-    if (ks->key_src)
-    {
-        free(ks->key_src);
-    }
+    free(ks->rec_ack);
+    free(ks->key_src);
 
     packet_id_free(&ks->crypto_options.packet_id);
 
@@ -1021,7 +1020,7 @@ tls_session_user_pass_enabled(struct tls_session *session)
 {
     return (session->opt->auth_user_pass_verify_script
             || plugin_defined(session->opt->plugins, OPENVPN_PLUGIN_AUTH_USER_PASS_VERIFY)
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
             || management_enable_def_auth(management)
 #endif
             );
@@ -1109,7 +1108,10 @@ tls_session_init(struct tls_multi *multi, struct tls_session *session)
  * @param session      - A pointer to the \c tls_session structure to be
  *                       cleaned up.
  * @param clear        - Whether the memory allocated for the \a session
- *                       object should be overwritten with 0s.
+ *                       object should be overwritten with 0s. This
+ *                       implicitly sets many states to 0/false,
+ *                       e.g. the validity of the keys in the structure
+ *
  */
 static void
 tls_session_free(struct tls_session *session, bool clear)
@@ -1118,13 +1120,13 @@ tls_session_free(struct tls_session *session, bool clear)
 
     for (size_t i = 0; i < KS_SIZE; ++i)
     {
+        /* we don't need clear=true for this call since
+         * the structs are part of session and get cleared
+         * as part of session */
         key_state_free(&session->key[i], false);
     }
 
-    if (session->common_name)
-    {
-        free(session->common_name);
-    }
+    free(session->common_name);
 
     cert_hash_free(session->cert_hash_set);
 
@@ -1229,15 +1231,6 @@ tls_multi_init(struct tls_options *tls_options)
     /* get command line derived options */
     ret->opt = *tls_options;
 
-    /* set up list of keys to be scanned by data channel encrypt and decrypt routines */
-    ASSERT(SIZE(ret->key_scan) == 3);
-    ret->key_scan[0] = &ret->session[TM_ACTIVE].key[KS_PRIMARY];
-    ret->key_scan[1] = &ret->session[TM_ACTIVE].key[KS_LAME_DUCK];
-    ret->key_scan[2] = &ret->session[TM_LAME_DUCK].key[KS_LAME_DUCK];
-
-    /* By default not use P_DATA_V2 */
-    ret->use_peer_id = false;
-
     return ret;
 }
 
@@ -1316,16 +1309,8 @@ tls_multi_free(struct tls_multi *multi, bool clear)
     auth_set_client_reason(multi, NULL);
 
     free(multi->peer_info);
-
-    if (multi->locked_cn)
-    {
-        free(multi->locked_cn);
-    }
-
-    if (multi->locked_username)
-    {
-        free(multi->locked_username);
-    }
+    free(multi->locked_cn);
+    free(multi->locked_username);
 
     cert_hash_free(multi->locked_cert_hash_set);
 
@@ -1765,27 +1750,50 @@ openvpn_PRF(const uint8_t *secret,
     VALGRIND_MAKE_READABLE((void *)output, output_len);
 }
 
-/*
- * Using source entropy from local and remote hosts, mix into
- * master key.
- */
+static void
+init_key_contexts(struct key_ctx_bi *key,
+                  const struct key_type *key_type,
+                  bool server,
+                  struct key2 *key2)
+{
+    /* Initialize key contexts */
+    int key_direction = server ? KEY_DIRECTION_INVERSE : KEY_DIRECTION_NORMAL;
+    init_key_ctx_bi(key, key2, key_direction, key_type, "Data Channel");
+
+    /* Initialize implicit IVs */
+    key_ctx_update_implicit_iv(&key->encrypt, (*key2).keys[(int)server].hmac,
+                               MAX_HMAC_KEY_LENGTH);
+    key_ctx_update_implicit_iv(&key->decrypt, (*key2).keys[1-(int)server].hmac,
+                               MAX_HMAC_KEY_LENGTH);
+
+}
+
 static bool
-generate_key_expansion(struct key_ctx_bi *key,
-                       const struct key_type *key_type,
-                       const struct key_source2 *key_src,
-                       const struct session_id *client_sid,
-                       const struct session_id *server_sid,
-                       bool server)
+generate_key_expansion_tls_export(struct tls_session *session, struct key2 *key2)
+{
+    if (!key_state_export_keying_material(session, EXPORT_KEY_DATA_LABEL,
+                                          strlen(EXPORT_KEY_DATA_LABEL),
+                                          key2->keys, sizeof(key2->keys)))
+    {
+        return false;
+    }
+    key2->n = 2;
+
+    return true;
+}
+
+static struct key2
+generate_key_expansion_openvpn_prf(const struct tls_session *session)
 {
     uint8_t master[48] = { 0 };
-    struct key2 key2 = { 0 };
-    bool ret = false;
 
-    if (key->initialized)
-    {
-        msg(D_TLS_ERRORS, "TLS Error: key already initialized");
-        goto exit;
-    }
+    const struct key_state *ks = &session->key[KS_PRIMARY];
+    const struct key_source2 *key_src = ks->key_src;
+
+    const struct session_id *client_sid = session->opt->server ?
+                                          &ks->session_id_remote : &session->session_id;
+    const struct session_id *server_sid = !session->opt->server ?
+                                          &ks->session_id_remote : &session->session_id;
 
     /* debugging print of source key material */
     key_source2_print(key_src);
@@ -1803,6 +1811,7 @@ generate_key_expansion(struct key_ctx_bi *key,
                 master,
                 sizeof(master));
 
+    struct key2 key2;
     /* compute key expansion */
     openvpn_PRF(master,
                 sizeof(master),
@@ -1815,36 +1824,77 @@ generate_key_expansion(struct key_ctx_bi *key,
                 server_sid,
                 (uint8_t *)key2.keys,
                 sizeof(key2.keys));
+    secure_memzero(&master, sizeof(master));
 
+    /*
+     * fixup_key only correctly sets DES parity bits if the cipher is a
+     * DES variant.
+     *
+     * The newer OpenSSL and mbed TLS libraries (those that support EKM)
+     * ignore these bits.
+     *
+     * We keep the DES fixup here as compatibility.
+     * OpenVPN3 never did this fixup anyway. So this code is *probably* not
+     * required but we keep it for compatibility until we remove DES support
+     * since it does not hurt either.
+     */
+    for (int i = 0; i < 2; ++i)
+    {
+        fixup_key(&key2.keys[i], &session->opt->key_type);
+    }
     key2.n = 2;
 
-    key2_print(&key2, key_type, "Master Encrypt", "Master Decrypt");
+    return key2;
+}
+
+/*
+ * Using source entropy from local and remote hosts, mix into
+ * master key.
+ */
+static bool
+generate_key_expansion(struct key_ctx_bi *key,
+                       struct tls_session *session)
+{
+    bool ret = false;
+    struct key2 key2;
+
+    if (key->initialized)
+    {
+        msg(D_TLS_ERRORS, "TLS Error: key already initialized");
+        goto exit;
+    }
+
+    bool server = session->opt->server;
+
+    if (session->opt->crypto_flags & CO_USE_TLS_KEY_MATERIAL_EXPORT)
+    {
+        if (!generate_key_expansion_tls_export(session, &key2))
+        {
+            msg(D_TLS_ERRORS, "TLS Error: Keying material export failed");
+            goto exit;
+        }
+    }
+    else
+    {
+        key2 = generate_key_expansion_openvpn_prf(session);
+    }
+
+    key2_print(&key2, &session->opt->key_type,
+               "Master Encrypt", "Master Decrypt");
 
     /* check for weak keys */
     for (int i = 0; i < 2; ++i)
     {
-        fixup_key(&key2.keys[i], key_type);
-        if (!check_key(&key2.keys[i], key_type))
+        if (!check_key(&key2.keys[i], &session->opt->key_type))
         {
             msg(D_TLS_ERRORS, "TLS Error: Bad dynamic key generated");
             goto exit;
         }
     }
-
-    /* Initialize OpenSSL key contexts */
-    int key_direction = server ? KEY_DIRECTION_INVERSE : KEY_DIRECTION_NORMAL;
-    init_key_ctx_bi(key, &key2, key_direction, key_type, "Data Channel");
-
-    /* Initialize implicit IVs */
-    key_ctx_update_implicit_iv(&key->encrypt, key2.keys[(int)server].hmac,
-                               MAX_HMAC_KEY_LENGTH);
-    key_ctx_update_implicit_iv(&key->decrypt, key2.keys[1-(int)server].hmac,
-                               MAX_HMAC_KEY_LENGTH);
-
+    init_key_contexts(key, &session->opt->key_type, server, &key2);
     ret = true;
 
 exit:
-    secure_memzero(&master, sizeof(master));
     secure_memzero(&key2, sizeof(key2));
 
     return ret;
@@ -1879,10 +1929,6 @@ tls_session_generate_data_channel_keys(struct tls_session *session)
 {
     bool ret = false;
     struct key_state *ks = &session->key[KS_PRIMARY];   /* primary key */
-    const struct session_id *client_sid = session->opt->server ?
-                                          &ks->session_id_remote : &session->session_id;
-    const struct session_id *server_sid = !session->opt->server ?
-                                          &ks->session_id_remote : &session->session_id;
 
     if (ks->authenticated == KS_AUTH_FALSE)
     {
@@ -1891,9 +1937,8 @@ tls_session_generate_data_channel_keys(struct tls_session *session)
     }
 
     ks->crypto_options.flags = session->opt->crypto_flags;
-    if (!generate_key_expansion(&ks->crypto_options.key_ctx_bi,
-                                &session->opt->key_type, ks->key_src, client_sid, server_sid,
-                                session->opt->server))
+
+    if (!generate_key_expansion(&ks->crypto_options.key_ctx_bi, session))
     {
         msg(D_TLS_ERRORS, "TLS Error: generate_key_expansion failed");
         goto cleanup;
@@ -1929,6 +1974,11 @@ tls_session_update_crypto_params(struct tls_session *session,
         /* undo cipher push, abort connection setup */
         options->ciphername = session->opt->config_ciphername;
         return false;
+    }
+
+    if (options->data_channel_use_ekm)
+    {
+        session->opt->crypto_flags |= CO_USE_TLS_KEY_MATERIAL_EXPORT;
     }
 
     if (strcmp(options->ciphername, session->opt->config_ciphername))
@@ -2215,12 +2265,10 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
          * push request, also signal that the client wants
          * to get push-reply messages without without requiring a round
          * trip for a push request message*/
-        if(session->opt->pull)
+        if (session->opt->pull)
         {
             iv_proto |= IV_PROTO_REQUEST_PUSH;
         }
-
-        buf_printf(&out, "IV_PROTO=%d\n", iv_proto);
 
         /* support for Negotiable Crypto Parameters */
         if (session->opt->ncp_enabled
@@ -2233,7 +2281,13 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
                 buf_printf(&out, "IV_NCP=2\n");
             }
             buf_printf(&out, "IV_CIPHERS=%s\n", session->opt->config_ncp_ciphers);
+
+#ifdef HAVE_EXPORT_KEYING_MATERIAL
+            iv_proto |= IV_PROTO_TLS_KEY_EXPORT;
+#endif
         }
+
+        buf_printf(&out, "IV_PROTO=%d\n", iv_proto);
 
         /* push compression status */
 #ifdef USE_COMP
@@ -2358,14 +2412,15 @@ key_method_2_write(struct buffer *buf, struct tls_session *session)
         }
         /* if auth-nocache was specified, the auth_user_pass object reaches
          * a "complete" state only after having received the push-reply
-         * message.
+         * message. The push message might contain an auth-token that needs
+         * the username of auth_user_pass.
          *
          * For this reason, skip the purge operation here if no push-reply
          * message has been received yet.
          *
          * This normally happens upon first negotiation only.
          */
-        if (!auth_user_pass.wait_for_push)
+        if (!session->opt->pull)
         {
             purge_user_pass(&auth_user_pass, false);
         }
@@ -2421,12 +2476,11 @@ export_user_keying_material(struct key_state_ssl *ssl,
         unsigned int size = session->opt->ekm_size;
         struct gc_arena gc = gc_new();
 
-        unsigned char *ekm;
-        if ((ekm = key_state_export_keying_material(session,
-                                                    session->opt->ekm_label,
-                                                    session->opt->ekm_label_size,
-                                                    session->opt->ekm_size,
-                                                    &gc)))
+        unsigned char *ekm = gc_malloc(session->opt->ekm_size, true, &gc);
+        if (key_state_export_keying_material(session,
+                                             session->opt->ekm_label,
+                                             session->opt->ekm_label_size,
+                                             ekm, session->opt->ekm_size))
         {
             unsigned int len = (size * 2) + 2;
 
@@ -2517,6 +2571,14 @@ key_method_2_read(struct buffer *buf, struct tls_multi *multi, struct tls_sessio
     free(multi->remote_ciphername);
     multi->remote_ciphername =
         options_string_extract_option(options, "cipher", NULL);
+
+    /* In OCC we send '[null-cipher]' instead 'none' */
+    if (multi->remote_ciphername
+        && strcmp(multi->remote_ciphername, "[null-cipher]") == 0)
+    {
+        free(multi->remote_ciphername);
+        multi->remote_ciphername = string_alloc("none", NULL);
+    }
 
     if (tls_session_user_pass_enabled(session))
     {
@@ -3103,7 +3165,7 @@ tls_multi_process(struct tls_multi *multi,
 
     update_time();
 
-    int tas = tls_authentication_status(multi, TLS_MULTI_AUTH_STATUS_INTERVAL);
+    enum tls_auth_status tas = tls_authentication_status(multi, TLS_MULTI_AUTH_STATUS_INTERVAL);
 
     /*
      * If lame duck session expires, kill it.
@@ -3123,7 +3185,7 @@ tls_multi_process(struct tls_multi *multi,
      * verification failed.  A semi-trusted session can forward data on the
      * TLS control channel but not on the tunnel channel.
      */
-    if (DECRYPT_KEY_ENABLED(multi, &multi->session[TM_UNTRUSTED].key[KS_PRIMARY]))
+    if (TLS_AUTHENTICATED(multi, &multi->session[TM_UNTRUSTED].key[KS_PRIMARY]))
     {
         move_session(multi, TM_ACTIVE, TM_UNTRUSTED, true);
         msg(D_TLS_DEBUG_LOW, "TLS: tls_multi_process: untrusted session promoted to %strusted",
@@ -3136,9 +3198,9 @@ tls_multi_process(struct tls_multi *multi,
      */
     if (error)
     {
-        for (int i = 0; i < (int) SIZE(multi->key_scan); ++i)
+        for (int i = 0; i < KEY_SCAN_SIZE; ++i)
         {
-            if (multi->key_scan[i]->state >= S_ACTIVE)
+            if (get_key_scan(multi, i)->state >= S_ACTIVE)
             {
                 goto nohard;
             }
@@ -3153,9 +3215,9 @@ nohard:
         const int throw_level = GREMLIN_CONNECTION_FLOOD_LEVEL(multi->opt.gremlin);
         if (throw_level)
         {
-            for (int i = 0; i < (int) SIZE(multi->key_scan); ++i)
+            for (int i = 0; i < KEY_SCAN_SIZE; ++i)
             {
-                if (multi->key_scan[i]->state >= throw_level)
+                if (get_key_scan(multi, i)->state >= throw_level)
                 {
                     ++multi->n_hard_errors;
                     ++multi->n_soft_errors;
@@ -3193,7 +3255,7 @@ handle_data_channel_packet(struct tls_multi *multi,
     /* data channel packet */
     for (int i = 0; i < KEY_SCAN_SIZE; ++i)
     {
-        struct key_state *ks = multi->key_scan[i];
+        struct key_state *ks = get_key_scan(multi, i);
 
         /*
          * This is the basic test of TLS state compatibility between a local OpenVPN
@@ -3208,7 +3270,7 @@ handle_data_channel_packet(struct tls_multi *multi,
          * passive side is the server which only listens for the connections, the
          * active side is the client which initiates connections).
          */
-        if (DECRYPT_KEY_ENABLED(multi, ks)
+        if (TLS_AUTHENTICATED(multi, ks)
             && key_id == ks->key_id
             && (ks->authenticated == KS_AUTH_TRUE)
             && (floated || link_socket_actual_match(from, &ks->remote_addr)))
@@ -3255,8 +3317,10 @@ handle_data_channel_packet(struct tls_multi *multi,
     }
 
     msg(D_TLS_ERRORS,
-        "TLS Error: local/remote TLS keys are out of sync: %s [%d]",
-        print_link_socket_actual(from, &gc), key_id);
+        "TLS Error: local/remote TLS keys are out of sync: %s "
+        "(received key id: %d, known key ids: %s)",
+        print_link_socket_actual(from, &gc), key_id,
+        print_key_id(multi, &gc));
 
 done:
     tls_clear_error();
@@ -3533,7 +3597,7 @@ tls_pre_decrypt(struct tls_multi *multi,
          * Remote is requesting a key renegotiation
          */
         if (op == P_CONTROL_SOFT_RESET_V1
-            && DECRYPT_KEY_ENABLED(multi, ks))
+            && TLS_AUTHENTICATED(multi, ks))
         {
             if (!read_control_auth(buf, &session->tls_wrap, from,
                                    session->opt))
@@ -3802,7 +3866,7 @@ tls_pre_encrypt(struct tls_multi *multi,
     struct key_state *ks_select = NULL;
     for (int i = 0; i < KEY_SCAN_SIZE; ++i)
     {
-        struct key_state *ks = multi->key_scan[i];
+        struct key_state *ks = get_key_scan(multi, i);
         if (ks->state >= S_ACTIVE
             && (ks->authenticated == KS_AUTH_TRUE)
             && ks->crypto_options.key_ctx_bi.initialized
@@ -4130,8 +4194,7 @@ done:
 }
 
 void
-delayed_auth_pass_purge(void)
+ssl_clean_user_pass(void)
 {
-    auth_user_pass.wait_for_push = false;
     purge_user_pass(&auth_user_pass, false);
 }

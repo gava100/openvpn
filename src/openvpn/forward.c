@@ -155,7 +155,14 @@ check_tls(struct context *c)
         }
         else if (tmp_status == TLSMP_KILL)
         {
-            register_signal(c, SIGTERM, "auth-control-exit");
+            if (c->options.mode == MODE_SERVER)
+            {
+                send_auth_failed(c, c->c2.tls_multi->client_reason);
+            }
+            else
+            {
+                register_signal(c, SIGTERM, "auth-control-exit");
+            }
         }
 
         interval_future_trigger(&c->c2.tmp_int, wakeup);
@@ -880,9 +887,7 @@ process_incoming_link_part1(struct context *c, struct link_socket_info *lsi, boo
         if (management)
         {
             management_bytes_in(management, c->c2.buf.len);
-#ifdef MANAGEMENT_DEF_AUTH
             management_bytes_server(management, &c->c2.link_read_bytes, &c->c2.link_write_bytes, &c->c2.mda_context);
-#endif
         }
 #endif
     }
@@ -1644,9 +1649,7 @@ process_outgoing_link(struct context *c)
                 if (management)
                 {
                     management_bytes_out(management, size);
-#ifdef MANAGEMENT_DEF_AUTH
                     management_bytes_server(management, &c->c2.link_read_bytes, &c->c2.link_write_bytes, &c->c2.mda_context);
-#endif
                 }
 #endif
             }

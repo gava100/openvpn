@@ -116,6 +116,8 @@
  * to wait for a push-request to send a push-reply */
 #define IV_PROTO_REQUEST_PUSH   (1<<2)
 
+/** Supports key derivation via TLS key material exporter [RFC5705] */
+#define IV_PROTO_TLS_KEY_EXPORT (1<<3)
 
 /* Default field in X509 to be username */
 #define X509_USERNAME_FIELD_DEFAULT "CN"
@@ -497,14 +499,6 @@ bool tls_session_update_crypto_params(struct tls_session *session,
                                       struct frame *frame,
                                       struct frame *frame_fragment);
 
-#ifdef MANAGEMENT_DEF_AUTH
-static inline char *
-tls_get_peer_info(const struct tls_multi *multi)
-{
-    return multi->peer_info;
-}
-#endif
-
 /*
  * inline functions
  */
@@ -598,7 +592,10 @@ void extract_x509_field_test(void);
  */
 bool is_hard_reset_method2(int op);
 
-void delayed_auth_pass_purge(void);
+/**
+ * Cleans the saved user/password unless auth-nocache is in use.
+ */
+void ssl_clean_user_pass(void);
 
 
 /*

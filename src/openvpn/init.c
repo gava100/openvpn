@@ -500,6 +500,17 @@ next_connection_entry(struct context *c)
                  */
                 if (!c->options.persist_remote_ip)
                 {
+                    /* Connection entry addrinfo objects might have been
+                     * resolved earlier but the entry itself might have been
+                     * skipped by management on the previous loop.
+                     * If so, clear the addrinfo objects as close_instance does
+                     */
+                    if (c->c1.link_socket_addr.remote_list)
+                    {
+                        clear_remote_addrlist(&c->c1.link_socket_addr,
+                                              !c->options.resolve_in_advance);
+                    }
+
                     /* close_instance should have cleared the addrinfo objects */
                     ASSERT(c->c1.link_socket_addr.current_remote == NULL);
                     ASSERT(c->c1.link_socket_addr.remote_list == NULL);
@@ -676,6 +687,7 @@ restore_ncp_options(struct context *c)
     c->options.ciphername = c->c1.ciphername;
     c->options.authname = c->c1.authname;
     c->options.keysize = c->c1.keysize;
+    c->options.data_channel_use_ekm = false;
 }
 
 void
@@ -1226,10 +1238,18 @@ possibly_become_daemon(const struct options *options)
     {
         ASSERT(!options->inetd);
         /* Don't chdir immediately, but the end of the init sequence, if needed */
+
+#if defined(__APPLE__) && defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
         if (daemon(1, options->log) < 0)
         {
             msg(M_ERR, "daemon() failed or unsupported");
         }
+#if defined(__APPLE__) && defined(__clang__)
+#pragma clang diagnostic pop
+#endif
         restore_signal_state();
         if (options->log)
         {
@@ -1595,7 +1615,7 @@ initialization_sequence_completed(struct context *c, const unsigned int flags)
      */
     if (c->options.mode == MODE_POINT_TO_POINT)
     {
-        delayed_auth_pass_purge();
+        ssl_clean_user_pass();
     }
 
     /* Test if errors */
@@ -2543,7 +2563,6 @@ key_schedule_free(struct key_schedule *ks, bool free_ssl_ctx)
     if (tls_ctx_initialised(&ks->ssl_ctx) && free_ssl_ctx)
     {
         tls_ctx_free(&ks->ssl_ctx);
-        free_key_ctx(&ks->tls_crypt_v2_server_key);
     }
     CLEAR(*ks);
 }
@@ -2907,14 +2926,14 @@ do_init_crypto_tls(struct context *c, const unsigned int flags)
     to.crl_file_inline = options->crl_file_inline;
     to.ssl_flags = options->ssl_flags;
     to.ns_cert_type = options->ns_cert_type;
-    memmove(to.remote_cert_ku, options->remote_cert_ku, sizeof(to.remote_cert_ku));
+    memcpy(to.remote_cert_ku, options->remote_cert_ku, sizeof(to.remote_cert_ku));
     to.remote_cert_eku = options->remote_cert_eku;
     to.verify_hash = options->verify_hash;
     to.verify_hash_algo = options->verify_hash_algo;
 #ifdef ENABLE_X509ALTUSERNAME
-    to.x509_username_field = (char *) options->x509_username_field;
+    memcpy(to.x509_username_field, options->x509_username_field, sizeof(to.x509_username_field));
 #else
-    to.x509_username_field = X509_USERNAME_FIELD_DEFAULT;
+    to.x509_username_field[0] = X509_USERNAME_FIELD_DEFAULT;
 #endif
     to.es = c->c2.es;
     to.net_ctx = &c->net_ctx;
@@ -2925,7 +2944,7 @@ do_init_crypto_tls(struct context *c, const unsigned int flags)
 
     to.plugins = c->plugins;
 
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
     to.mda_context = &c->c2.mda_context;
 #endif
 
@@ -3579,14 +3598,9 @@ do_close_tls(struct context *c)
     }
 
     /* free options compatibility strings */
-    if (c->c2.options_string_local)
-    {
-        free(c->c2.options_string_local);
-    }
-    if (c->c2.options_string_remote)
-    {
-        free(c->c2.options_string_remote);
-    }
+    free(c->c2.options_string_local);
+    free(c->c2.options_string_remote);
+
     c->c2.options_string_local = c->c2.options_string_remote = NULL;
 
     if (c->c2.pulled_options_state)
@@ -3606,6 +3620,7 @@ do_close_free_key_schedule(struct context *c, bool free_ssl_ctx)
      * always free the tls_auth/crypt key. If persist_key is true, the key will
      * be reloaded from memory (pre-cached)
      */
+    free_key_ctx(&c->c1.ks.tls_crypt_v2_server_key);
     free_key_ctx_bi(&c->c1.ks.tls_wrap_key);
     CLEAR(c->c1.ks.tls_wrap_key);
     buf_clear(&c->c1.ks.tls_crypt_v2_wkc);
@@ -3637,7 +3652,8 @@ do_close_link_socket(struct context *c)
           && ( (c->options.persist_remote_ip)
                ||
                ( c->sig->source != SIG_SOURCE_HARD
-                 && ((c->c1.link_socket_addr.current_remote && c->c1.link_socket_addr.current_remote->ai_next)
+                 && ((c->c1.link_socket_addr.current_remote
+                      && c->c1.link_socket_addr.current_remote->ai_next)
                      || c->options.no_advance))
                )))
     {
@@ -4476,7 +4492,7 @@ close_instance(struct context *c)
         /* close TUN/TAP device */
         do_close_tun(c, false);
 
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
         if (management)
         {
             management_notify_client_close(management, &c->c2.mda_context, NULL);

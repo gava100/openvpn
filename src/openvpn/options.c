@@ -393,11 +393,9 @@ static const char usage_message[] =
     "--management-client-group g : When management interface is a unix socket, only\n"
     "                              allow connections from group g.\n"
 #endif
-#ifdef MANAGEMENT_DEF_AUTH
     "--management-client-auth : gives management interface client the responsibility\n"
     "                           to authenticate clients after their client certificate\n"
     "			      has been verified.\n"
-#endif
 #ifdef MANAGEMENT_PF
     "--management-client-pf : management interface clients must specify a packet\n"
     "                         filter file for each connecting client.\n"
@@ -879,7 +877,7 @@ init_options(struct options *o, const bool init_gc)
     o->tls_cert_profile = NULL;
     o->ecdh_curve = NULL;
 #ifdef ENABLE_X509ALTUSERNAME
-    o->x509_username_field = X509_USERNAME_FIELD_DEFAULT;
+    o->x509_username_field[0] = X509_USERNAME_FIELD_DEFAULT;
 #endif
 #ifdef ENABLE_PKCS11
     o->pkcs11_pin_cache_period = -1;
@@ -1989,7 +1987,25 @@ connection_entry_load_re(struct connection_entry *ce, const struct remote_entry 
 }
 
 static void
-options_postprocess_verify_ce(const struct options *options, const struct connection_entry *ce)
+connection_entry_preload_key(const char **key_file, bool *key_inline,
+                             struct gc_arena *gc)
+{
+    if (key_file && *key_file && !(*key_inline))
+    {
+        struct buffer in = buffer_read_from_file(*key_file, gc);
+        if (!buf_valid(&in))
+        {
+            msg(M_FATAL, "Cannot pre-load keyfile (%s)", *key_file);
+        }
+
+        *key_file = (const char *) in.data;
+        *key_inline = true;
+    }
+}
+
+static void
+options_postprocess_verify_ce(const struct options *options,
+                              const struct connection_entry *ce)
 {
     struct options defaults;
     int dev = DEV_TYPE_UNDEF;
@@ -2017,7 +2033,9 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
      */
     if (ce->proto == PROTO_TCP)
     {
-        msg(M_USAGE, "--proto tcp is ambiguous in this context.  Please specify --proto tcp-server or --proto tcp-client");
+        msg(M_USAGE,
+            "--proto tcp is ambiguous in this context. Please specify "
+            "--proto tcp-server or --proto tcp-client");
     }
 
     /*
@@ -2057,8 +2075,9 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
 
     if (options->inetd)
     {
-        msg(M_WARN, "DEPRECATED OPTION: --inetd mode is deprecated "
-            "and will be removed in OpenVPN 2.6");
+        msg(M_WARN,
+            "DEPRECATED OPTION: --inetd mode is deprecated and will be removed "
+            "in OpenVPN 2.6");
     }
 
     if (options->lladdr && dev != DEV_TYPE_TAP)
@@ -2071,7 +2090,9 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
      */
     if (options->ce.tun_mtu_defined && options->ce.link_mtu_defined)
     {
-        msg(M_USAGE, "only one of --tun-mtu or --link-mtu may be defined (note that --ifconfig implies --link-mtu %d)", LINK_MTU_DEFAULT);
+        msg(M_USAGE,
+            "only one of --tun-mtu or --link-mtu may be defined (note that "
+            "--ifconfig implies --link-mtu %d)", LINK_MTU_DEFAULT);
     }
 
     if (!proto_is_udp(ce->proto) && options->mtu_test)
@@ -2098,18 +2119,23 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
     if (string_defined_equal(ce->remote, options->ifconfig_local)
         || string_defined_equal(ce->remote, options->ifconfig_remote_netmask))
     {
-        msg(M_USAGE, "--local and --remote addresses must be distinct from --ifconfig addresses");
+        msg(M_USAGE,
+            "--local and --remote addresses must be distinct from --ifconfig "
+            "addresses");
     }
 
     if (string_defined_equal(ce->local, options->ifconfig_local)
         || string_defined_equal(ce->local, options->ifconfig_remote_netmask))
     {
-        msg(M_USAGE, "--local addresses must be distinct from --ifconfig addresses");
+        msg(M_USAGE,
+            "--local addresses must be distinct from --ifconfig addresses");
     }
 
-    if (string_defined_equal(options->ifconfig_local, options->ifconfig_remote_netmask))
+    if (string_defined_equal(options->ifconfig_local,
+                             options->ifconfig_remote_netmask))
     {
-        msg(M_USAGE, "local and remote/netmask --ifconfig addresses must be different");
+        msg(M_USAGE,
+            "local and remote/netmask --ifconfig addresses must be different");
     }
 
     if (ce->bind_defined && !ce->bind_local)
@@ -2119,12 +2145,14 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
 
     if (ce->local && !ce->bind_local)
     {
-        msg(M_USAGE, "--local and --nobind don't make sense when used together");
+        msg(M_USAGE,
+            "--local and --nobind don't make sense when used together");
     }
 
     if (ce->local_port_defined && !ce->bind_local)
     {
-        msg(M_USAGE, "--lport and --nobind don't make sense when used together");
+        msg(M_USAGE,
+            "--lport and --nobind don't make sense when used together");
     }
 
     if (!ce->remote && !ce->bind_local)
@@ -2187,10 +2215,11 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
     }
 
     if (options->tuntap_options.dhcp_options
+        && options->windows_driver != WINDOWS_DRIVER_WINTUN
         && options->tuntap_options.ip_win32_type != IPW32_SET_DHCP_MASQ
         && options->tuntap_options.ip_win32_type != IPW32_SET_ADAPTIVE)
     {
-        msg(M_USAGE, "--dhcp-options requires --ip-win32 dynamic or adaptive");
+        msg(M_USAGE, "--dhcp-option requires --ip-win32 dynamic or adaptive");
     }
 
     if (options->windows_driver == WINDOWS_DRIVER_WINTUN && dev != DEV_TYPE_TUN)
@@ -2212,7 +2241,8 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
 
     if (!proto_is_udp(ce->proto) && ce->explicit_exit_notification)
     {
-        msg(M_USAGE, "--explicit-exit-notify can only be used with --proto udp");
+        msg(M_USAGE,
+            "--explicit-exit-notify can only be used with --proto udp");
     }
 
     if (!ce->remote && ce->proto == PROTO_TCP_CLIENT)
@@ -2222,16 +2252,21 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
 
     if ((ce->http_proxy_options) && ce->proto != PROTO_TCP_CLIENT)
     {
-        msg(M_USAGE, "--http-proxy MUST be used in TCP Client mode (i.e. --proto tcp-client)");
+        msg(M_USAGE,
+            "--http-proxy MUST be used in TCP Client mode (i.e. --proto "
+            "tcp-client)");
     }
+
     if ((ce->http_proxy_options) && !ce->http_proxy_options->server)
     {
-        msg(M_USAGE, "--http-proxy not specified but other http proxy options present");
+        msg(M_USAGE,
+            "--http-proxy not specified but other http proxy options present");
     }
 
     if (ce->http_proxy_options && ce->socks_proxy_server)
     {
-        msg(M_USAGE, "--http-proxy can not be used together with --socks-proxy");
+        msg(M_USAGE,
+            "--http-proxy can not be used together with --socks-proxy");
     }
 
     if (ce->socks_proxy_server && ce->proto == PROTO_TCP_SERVER)
@@ -2297,8 +2332,9 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
         {
             msg(M_USAGE, "--socks-proxy cannot be used with --mode server");
         }
-        /* <connection> blocks force to have a remote embedded, so we check for the
-         * --remote and bail out if it  is present */
+        /* <connection> blocks force to have a remote embedded, so we check
+         * for the --remote and bail out if it is present
+         */
         if (options->connection_list->len >1
             || options->connection_list->array[0]->remote)
         {
@@ -2315,12 +2351,15 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
         }
         if (options->ipchange)
         {
-            msg(M_USAGE, "--ipchange cannot be used with --mode server (use --client-connect instead)");
+            msg(M_USAGE,
+                "--ipchange cannot be used with --mode server (use "
+                "--client-connect instead)");
         }
         if (!(proto_is_dgram(ce->proto) || ce->proto == PROTO_TCP_SERVER))
         {
-            msg(M_USAGE, "--mode server currently only supports "
-                "--proto udp or --proto tcp-server or --proto tcp6-server");
+            msg(M_USAGE,
+                "--mode server currently only supports --proto udp or --proto "
+                "tcp-server or --proto tcp6-server");
         }
         if (!proto_is_udp(ce->proto) && (options->cf_max || options->cf_per))
         {
@@ -2822,12 +2861,14 @@ options_postprocess_mutate_ce(struct options *o, struct connection_entry *ce)
     }
 #endif
 
-    if (ce->proto == PROTO_TCP_CLIENT && !ce->local && !ce->local_port_defined && !ce->bind_defined)
+    if (ce->proto == PROTO_TCP_CLIENT && !ce->local
+        && !ce->local_port_defined && !ce->bind_defined)
     {
         ce->bind_local = false;
     }
 
-    if (ce->proto == PROTO_UDP && ce->socks_proxy_server && !ce->local && !ce->local_port_defined && !ce->bind_defined)
+    if (ce->proto == PROTO_UDP && ce->socks_proxy_server && !ce->local
+        && !ce->local_port_defined && !ce->bind_defined)
     {
         ce->bind_local = false;
     }
@@ -2837,7 +2878,9 @@ options_postprocess_mutate_ce(struct options *o, struct connection_entry *ce)
         ce->local_port = NULL;
     }
 
-    /* if protocol forcing is enabled, disable all protocols except for the forced one */
+    /* if protocol forcing is enabled, disable all protocols
+     * except for the forced one
+     */
     if (o->proto_force >= 0 && o->proto_force != ce->proto)
     {
         ce->flags |= CE_DISABLED;
@@ -2911,36 +2954,17 @@ options_postprocess_mutate_ce(struct options *o, struct connection_entry *ce)
         ce->tls_crypt_v2_file_inline = o->tls_crypt_v2_file_inline;
     }
 
-    /* pre-cache tls-auth/crypt key file if persist-key was specified and keys
-     * were not already embedded in the config file
+    /* Pre-cache tls-auth/crypt(-v2) key file if persist-key was specified and
+     * keys were not already embedded in the config file.
      */
     if (o->persist_key)
     {
-        if (ce->tls_auth_file && !ce->tls_auth_file_inline)
-        {
-            struct buffer in = buffer_read_from_file(ce->tls_auth_file, &o->gc);
-            if (!buf_valid(&in))
-            {
-                msg(M_FATAL, "Cannot pre-load tls-auth keyfile (%s)",
-                    ce->tls_auth_file);
-            }
-
-            ce->tls_auth_file = (char *)in.data;
-            ce->tls_auth_file_inline = true;
-        }
-
-        if (ce->tls_crypt_file && !ce->tls_crypt_file_inline)
-        {
-            struct buffer in = buffer_read_from_file(ce->tls_crypt_file, &o->gc);
-            if (!buf_valid(&in))
-            {
-                msg(M_FATAL, "Cannot pre-load tls-crypt keyfile (%s)",
-                    ce->tls_crypt_file);
-            }
-
-            ce->tls_crypt_file = (char *)in.data;
-            ce->tls_crypt_file_inline = true;
-        }
+        connection_entry_preload_key(&ce->tls_auth_file,
+                                     &ce->tls_auth_file_inline, &o->gc);
+        connection_entry_preload_key(&ce->tls_crypt_file,
+                                     &ce->tls_crypt_file_inline, &o->gc);
+        connection_entry_preload_key(&ce->tls_crypt_v2_file,
+                                     &ce->tls_crypt_v2_file_inline, &o->gc);
     }
 }
 
@@ -4639,7 +4663,8 @@ in_src_get(const struct in_src *is, char *line, const int size)
 }
 
 static char *
-read_inline_file(struct in_src *is, const char *close_tag, struct gc_arena *gc)
+read_inline_file(struct in_src *is, const char *close_tag,
+                 int *num_lines, struct gc_arena *gc)
 {
     char line[OPTION_LINE_SIZE];
     struct buffer buf = alloc_buf(8*OPTION_LINE_SIZE);
@@ -4648,6 +4673,7 @@ read_inline_file(struct in_src *is, const char *close_tag, struct gc_arena *gc)
 
     while (in_src_get(is, line, sizeof(line)))
     {
+        (*num_lines)++;
         char *line_ptr = line;
         /* Remove leading spaces */
         while (isspace(*line_ptr))
@@ -4681,10 +4707,10 @@ read_inline_file(struct in_src *is, const char *close_tag, struct gc_arena *gc)
     return ret;
 }
 
-static bool
+static int
 check_inline_file(struct in_src *is, char *p[], struct gc_arena *gc)
 {
-    bool is_inline = false;
+    int num_inline_lines = 0;
 
     if (p[0] && !p[1])
     {
@@ -4697,16 +4723,15 @@ check_inline_file(struct in_src *is, char *p[], struct gc_arena *gc)
             p[0] = string_alloc(arg + 1, gc);
             close_tag = alloc_buf(strlen(p[0]) + 4);
             buf_printf(&close_tag, "</%s>", p[0]);
-            p[1] = read_inline_file(is, BSTR(&close_tag), gc);
+            p[1] = read_inline_file(is, BSTR(&close_tag), &num_inline_lines, gc);
             p[2] = NULL;
             free_buf(&close_tag);
-            is_inline = true;
         }
     }
-    return is_inline;
+    return num_inline_lines;
 }
 
-static bool
+static int
 check_inline_file_via_fp(FILE *fp, char *p[], struct gc_arena *gc)
 {
     struct in_src is;
@@ -4715,7 +4740,7 @@ check_inline_file_via_fp(FILE *fp, char *p[], struct gc_arena *gc)
     return check_inline_file(&is, p, gc);
 }
 
-static bool
+static int
 check_inline_file_via_buf(struct buffer *multiline, char *p[],
                           struct gc_arena *gc)
 {
@@ -4786,13 +4811,12 @@ read_config_file(struct options *options,
                 }
                 if (parse_line(line + offset, p, SIZE(p)-1, file, line_num, msglevel, &options->gc))
                 {
-                    bool is_inline;
-
                     bypass_doubledash(&p[0]);
-                    is_inline = check_inline_file_via_fp(fp, p, &options->gc);
-                    add_option(options, p, is_inline, file, line_num, level,
+                    int lines_inline = check_inline_file_via_fp(fp, p, &options->gc);
+                    add_option(options, p, lines_inline, file, line_num, level,
                                msglevel, permission_mask, option_types_found,
                                es);
+                    line_num += lines_inline;
                 }
             }
             if (fp != stdin)
@@ -4835,12 +4859,11 @@ read_config_string(const char *prefix,
         ++line_num;
         if (parse_line(line, p, SIZE(p)-1, prefix, line_num, msglevel, &options->gc))
         {
-            bool is_inline;
-
             bypass_doubledash(&p[0]);
-            is_inline = check_inline_file_via_buf(&multiline, p, &options->gc);
-            add_option(options, p, is_inline, prefix, line_num, 0, msglevel,
+            int lines_inline = check_inline_file_via_buf(&multiline, p, &options->gc);
+            add_option(options, p, lines_inline, prefix, line_num, 0, msglevel,
                        permission_mask, option_types_found, es);
+            line_num += lines_inline;
         }
         CLEAR(p);
     }
@@ -5416,14 +5439,12 @@ add_option(struct options *options,
         options->management_flags |= MF_EXTERNAL_CERT;
         options->management_certificate = p[1];
     }
-#endif /* ifdef ENABLE_MANAGEMENT */
-#ifdef MANAGEMENT_DEF_AUTH
     else if (streq(p[0], "management-client-auth") && !p[1])
     {
         VERIFY_PERMISSION(OPT_P_GENERAL);
         options->management_flags |= MF_CLIENT_AUTH;
     }
-#endif
+#endif /* ifdef ENABLE_MANAGEMENT */
 #ifdef MANAGEMENT_PF
     else if (streq(p[0], "management-client-pf") && !p[1])
     {
@@ -5695,7 +5716,9 @@ add_option(struct options *options,
                 const sa_family_t af = ascii2af(p[3]);
                 if (proto < 0)
                 {
-                    msg(msglevel, "remote: bad protocol associated with host %s: '%s'", p[1], p[3]);
+                    msg(msglevel,
+                        "remote: bad protocol associated with host %s: '%s'",
+                        p[1], p[3]);
                     goto err;
                 }
                 re.proto = proto;
@@ -6215,7 +6238,8 @@ add_option(struct options *options,
         af = ascii2af(p[1]);
         if (proto < 0)
         {
-            msg(msglevel, "Bad protocol: '%s'.  Allowed protocols with --proto option: %s",
+            msg(msglevel,
+                "Bad protocol: '%s'. Allowed protocols with --proto option: %s",
                 p[1],
                 proto2ascii_all(&gc));
             goto err;
@@ -7460,7 +7484,8 @@ add_option(struct options *options,
         VERIFY_PERMISSION(OPT_P_IPWIN32);
         bool ipv6dns = false;
 
-        if (streq(p[1], "DOMAIN") && p[2])
+        if ((streq(p[1], "DOMAIN") || streq(p[1], "ADAPTER_DOMAIN_SUFFIX"))
+            && p[2])
         {
             o->domain = p[2];
         }
@@ -7967,6 +7992,20 @@ add_option(struct options *options,
                 " '--data-ciphers' (renamed in OpenVPN 2.5).");
         }
         options->ncp_ciphers = p[1];
+    }
+    else if (streq(p[0], "key-derivation") && p[1])
+    {
+        VERIFY_PERMISSION(OPT_P_NCP)
+#ifdef HAVE_EXPORT_KEYING_MATERIAL
+        if (streq(p[1], "tls-ekm"))
+        {
+            options->data_channel_use_ekm = true;
+        }
+        else
+#endif
+        {
+            msg(msglevel, "Unknown key-derivation method %s", p[1]);
+        }
     }
     else if (streq(p[0], "ncp-disable") && !p[1])
     {
@@ -8528,41 +8567,44 @@ add_option(struct options *options,
         x509_track_add(&options->x509_track, p[1], msglevel, &options->gc);
     }
 #ifdef ENABLE_X509ALTUSERNAME
-    else if (streq(p[0], "x509-username-field") && p[1] && !p[2])
+    else if (streq(p[0], "x509-username-field") && p[1])
     {
-        /* This option used to automatically upcase the fieldname passed as the
-         * option argument, e.g., "ou" became "OU". Now, this "helpfulness" is
+        /* This option used to automatically upcase the fieldnames passed as the
+         * option arguments, e.g., "ou" became "OU". Now, this "helpfulness" is
          * fine-tuned by only upcasing Subject field attribute names which consist
          * of all lower-case characters. Mixed-case attributes such as
          * "emailAddress" are left as-is. An option parameter having the "ext:"
          * prefix for matching X.509v3 extended fields will also remain unchanged.
          */
-        char *s = p[1];
-
         VERIFY_PERMISSION(OPT_P_GENERAL);
-        if (strncmp("ext:", s, 4) != 0)
+        for (size_t j = 1; j < MAX_PARMS && p[j] != NULL; ++j)
         {
-            size_t i = 0;
-            while (s[i] && !isupper(s[i]))
+            char *s = p[j];
+
+            if (strncmp("ext:", s, 4) != 0)
             {
-                i++;
-            }
-            if (strlen(s) == i)
-            {
-                while ((*s = toupper(*s)) != '\0')
+                size_t i = 0;
+                while (s[i] && !isupper(s[i]))
                 {
-                    s++;
+                    i++;
                 }
-                msg(M_WARN, "DEPRECATED FEATURE: automatically upcased the "
-                    "--x509-username-field parameter to '%s'; please update your"
-                    "configuration", p[1]);
+                if (strlen(s) == i)
+                {
+                    while ((*s = toupper(*s)) != '\0')
+                    {
+                        s++;
+                    }
+                    msg(M_WARN, "DEPRECATED FEATURE: automatically upcased the "
+                        "--x509-username-field parameter to '%s'; please update your"
+                        "configuration", p[j]);
+                }
             }
+            else if (!x509_username_field_ext_supported(s+4))
+            {
+                msg(msglevel, "Unsupported x509-username-field extension: %s", s);
+            }
+            options->x509_username_field[j-1] = p[j];
         }
-        else if (!x509_username_field_ext_supported(s+4))
-        {
-            msg(msglevel, "Unsupported x509-username-field extension: %s", s);
-        }
-        options->x509_username_field = p[1];
     }
 #endif /* ENABLE_X509ALTUSERNAME */
 #ifdef ENABLE_PKCS11
@@ -8692,6 +8734,11 @@ add_option(struct options *options,
             msg(msglevel, "Keying material exporter label must begin with "
                 "\"EXPORTER\"");
             goto err;
+        }
+        if (streq(p[1], EXPORT_KEY_DATA_LABEL))
+        {
+            msg(msglevel, "Keying material exporter label must not be '"
+                EXPORT_KEY_DATA_LABEL "'.");
         }
         if (ekm_length < 16 || ekm_length > 4095)
         {

@@ -645,7 +645,6 @@ verify_cert(struct tls_session *session, openvpn_x509_cert_t *cert, int cert_dep
 {
     result_t ret = FAILURE;
     char *subject = NULL;
-    char common_name[TLS_USERNAME_LEN+1] = {0}; /* null-terminated */
     const struct tls_options *opt;
     struct gc_arena gc = gc_new();
 
@@ -668,19 +667,47 @@ verify_cert(struct tls_session *session, openvpn_x509_cert_t *cert, int cert_dep
     string_replace_leading(subject, '-', '_');
 
     /* extract the username (default is CN) */
-    if (SUCCESS != backend_x509_get_username(common_name, sizeof(common_name),
-                                             opt->x509_username_field, cert))
+    struct buffer buf = alloc_buf_gc(256, &gc);
+    for (int i = 0; opt->x509_username_field[i] != NULL; i++)
     {
-        if (!cert_depth)
+        char username[TLS_USERNAME_LEN+1] = {0}; /* null-terminated */
+
+        if (SUCCESS != backend_x509_get_username(username, sizeof(username),
+                                                 opt->x509_username_field[i], cert))
         {
-            msg(D_TLS_ERRORS, "VERIFY ERROR: could not extract %s from X509 "
-                "subject string ('%s') -- note that the username length is "
-                "limited to %d characters",
-                opt->x509_username_field,
-                subject,
-                TLS_USERNAME_LEN);
-            goto cleanup;
+            if (!cert_depth)
+            {
+                msg(D_TLS_ERRORS, "VERIFY ERROR: could not extract %s from X509 "
+                    "subject string ('%s') -- note that the field length is "
+                    "limited to %d characters",
+                    opt->x509_username_field[i],
+                    subject,
+                    TLS_USERNAME_LEN);
+                goto cleanup;
+            }
+            break;
         }
+        if (!buf_printf(&buf, i ? "_%s" : "%s", username))
+        {
+            if (!cert_depth)
+            {
+                msg(D_TLS_ERRORS, "VERIFY ERROR: could not append %s from X509 "
+                    "certificate -- note that the username length is "
+                    "limited to %d characters",
+                    opt->x509_username_field[i],
+                    buf.capacity - 1);
+                goto cleanup;
+            }
+            break;
+        }
+    }
+
+    char *common_name = BSTR(&buf);
+    if (!common_name)
+    {
+        msg(D_TLS_ERRORS, "VERIFY ERROR: depth=%d, could not extract X509 "
+            "username string from certificate", cert_depth);
+        goto cleanup;
     }
 
     /* enforce character class restrictions in common name */
@@ -802,30 +829,26 @@ cleanup:
 * user/password authentication.
 *************************************************************************** */
 
-#ifdef ENABLE_DEF_AUTH
 /* key_state_test_auth_control_file return values,
  * NOTE: acf_merge indexing depends on these values */
 #define ACF_UNDEFINED 0
 #define ACF_SUCCEEDED 1
 #define ACF_DISABLED  2
 #define ACF_FAILED    3
-#endif
 
 void
 auth_set_client_reason(struct tls_multi *multi, const char *client_reason)
 {
-    if (multi->client_reason)
-    {
-        free(multi->client_reason);
-        multi->client_reason = NULL;
-    }
+    free(multi->client_reason);
+    multi->client_reason = NULL;
+
     if (client_reason && strlen(client_reason))
     {
         multi->client_reason = string_alloc(client_reason, NULL);
     }
 }
 
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
 
 static inline unsigned int
 man_def_auth_test(const struct key_state *ks)
@@ -839,9 +862,8 @@ man_def_auth_test(const struct key_state *ks)
         return ACF_DISABLED;
     }
 }
-#endif /* ifdef MANAGEMENT_DEF_AUTH */
+#endif /* ifdef ENABLE_MANAGEMENT */
 
-#ifdef PLUGIN_DEF_AUTH
 
 /*
  * auth_control_file functions
@@ -904,121 +926,100 @@ key_state_test_auth_control_file(struct key_state *ks)
     return ACF_DISABLED;
 }
 
-#endif /* ifdef PLUGIN_DEF_AUTH */
-
-/*
- * Return current session authentication state.  Return
- * value is TLS_AUTHENTICATION_x.
- */
-
-int
+enum tls_auth_status
 tls_authentication_status(struct tls_multi *multi, const int latency)
 {
     bool deferred = false;
+
+    /* at least one valid key has successfully completed authentication */
     bool success = false;
-    bool active = false;
 
-#ifdef ENABLE_DEF_AUTH
-    static const unsigned char acf_merge[] =
+    /* at least one key is enabled for decryption */
+    int active = 0;
+
+    /* at least one key already failed authentication */
+    bool failed_auth = false;
+
+    if (latency && multi->tas_last + latency >= now)
     {
-        ACF_UNDEFINED, /* s1=ACF_UNDEFINED s2=ACF_UNDEFINED */
-        ACF_UNDEFINED, /* s1=ACF_UNDEFINED s2=ACF_SUCCEEDED */
-        ACF_UNDEFINED, /* s1=ACF_UNDEFINED s2=ACF_DISABLED */
-        ACF_FAILED,  /* s1=ACF_UNDEFINED s2=ACF_FAILED */
-        ACF_UNDEFINED, /* s1=ACF_SUCCEEDED s2=ACF_UNDEFINED */
-        ACF_SUCCEEDED, /* s1=ACF_SUCCEEDED s2=ACF_SUCCEEDED */
-        ACF_SUCCEEDED, /* s1=ACF_SUCCEEDED s2=ACF_DISABLED */
-        ACF_FAILED,  /* s1=ACF_SUCCEEDED s2=ACF_FAILED */
-        ACF_UNDEFINED, /* s1=ACF_DISABLED  s2=ACF_UNDEFINED */
-        ACF_SUCCEEDED, /* s1=ACF_DISABLED  s2=ACF_SUCCEEDED */
-        ACF_DISABLED, /* s1=ACF_DISABLED  s2=ACF_DISABLED */
-        ACF_FAILED,  /* s1=ACF_DISABLED  s2=ACF_FAILED */
-        ACF_FAILED,  /* s1=ACF_FAILED    s2=ACF_UNDEFINED */
-        ACF_FAILED,  /* s1=ACF_FAILED    s2=ACF_SUCCEEDED */
-        ACF_FAILED,  /* s1=ACF_FAILED    s2=ACF_DISABLED */
-        ACF_FAILED   /* s1=ACF_FAILED    s2=ACF_FAILED */
-    };
-#endif /* ENABLE_DEF_AUTH */
+        return TLS_AUTHENTICATION_UNDEFINED;
+    }
+    multi->tas_last = now;
 
-    if (multi)
+    for (int i = 0; i < KEY_SCAN_SIZE; ++i)
     {
-        int i;
-
-#ifdef ENABLE_DEF_AUTH
-        if (latency && multi->tas_last && multi->tas_last + latency >= now)
+        struct key_state *ks = get_key_scan(multi, i);
+        if (TLS_AUTHENTICATED(multi, ks))
         {
-            return TLS_AUTHENTICATION_UNDEFINED;
-        }
-        multi->tas_last = now;
-#endif /* ENABLE_DEF_AUTH */
-
-        for (i = 0; i < KEY_SCAN_SIZE; ++i)
-        {
-            struct key_state *ks = multi->key_scan[i];
-            if (DECRYPT_KEY_ENABLED(multi, ks))
+            active++;
+            if (ks->authenticated == KS_AUTH_FALSE)
             {
-                active = true;
-                if (ks->authenticated > KS_AUTH_FALSE)
+                failed_auth = true;
+            }
+            else
+            {
+                unsigned int s1 = ACF_DISABLED;
+                unsigned int s2 = ACF_DISABLED;
+                s1 = key_state_test_auth_control_file(ks);
+#ifdef ENABLE_MANAGEMENT
+                s2 = man_def_auth_test(ks);
+#endif
+                ASSERT(s1 < 4 && s2 < 4);
+
+                if (s1 == ACF_FAILED || s2 == ACF_FAILED)
                 {
-#ifdef ENABLE_DEF_AUTH
-                    unsigned int s1 = ACF_DISABLED;
-                    unsigned int s2 = ACF_DISABLED;
-#ifdef PLUGIN_DEF_AUTH
-                    s1 = key_state_test_auth_control_file(ks);
-#endif /* PLUGIN_DEF_AUTH */
-#ifdef MANAGEMENT_DEF_AUTH
-                    s2 = man_def_auth_test(ks);
-#endif /* MANAGEMENT_DEF_AUTH */
-                    ASSERT(s1 < 4 && s2 < 4);
-                    switch (acf_merge[(s1<<2) + s2])
+                    ks->authenticated = KS_AUTH_FALSE;
+                    failed_auth = true;
+                }
+                else if (s1 == ACF_UNDEFINED || s2 == ACF_UNDEFINED)
+                {
+                    if (now < ks->auth_deferred_expire)
                     {
-                        case ACF_SUCCEEDED:
-                        case ACF_DISABLED:
-                            success = true;
-                            ks->authenticated = KS_AUTH_TRUE;
-                            break;
-
-                        case ACF_UNDEFINED:
-                            if (now < ks->auth_deferred_expire)
-                            {
-                                deferred = true;
-                            }
-                            break;
-
-                        case ACF_FAILED:
-                            ks->authenticated = KS_AUTH_FALSE;
-                            break;
-
-                        default:
-                            ASSERT(0);
+                        deferred = true;
                     }
-#else /* !ENABLE_DEF_AUTH */
+                }
+                else
+                {
+                    /* s1 and s2 are either ACF_DISABLED or ACF_SUCCEDED */
                     success = true;
-#endif /* ENABLE_DEF_AUTH */
+                    ks->authenticated = KS_AUTH_TRUE;
                 }
             }
         }
     }
 
 #if 0
-    dmsg(D_TLS_ERRORS, "TAS: a=%d s=%d d=%d", active, success, deferred);
+    dmsg(D_TLS_ERRORS, "TAS: a=%d s=%d d=%d f=%d", active, success, deferred, failed_auth);
 #endif
-
-    if (success)
+    if (failed_auth)
+    {
+        /* We have at least one session that failed authentication. There
+         * might be still another session with valid keys.
+         * Although our protocol allows keeping the VPN session alive
+         * with the other session (and we actually did that in earlier
+         * version, this behaviour is really strange from a user (admin)
+         * experience */
+        return TLS_AUTHENTICATION_FAILED;
+    }
+    else if (success)
     {
         return TLS_AUTHENTICATION_SUCCEEDED;
     }
-    else if (!active || deferred)
+    else if (active == 0 || deferred)
     {
+        /* We have a deferred authentication and no currently active key
+         * (first auth, no renegotiation)  */
         return TLS_AUTHENTICATION_DEFERRED;
     }
     else
     {
+        /* at least one key is active but none is fully authenticated (!success)
+         * and all active are either failed authed or expired deferred auth */
         return TLS_AUTHENTICATION_FAILED;
     }
 }
 
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
 /*
  * For deferred auth, this is where the management interface calls (on server)
  * to indicate auth failure/success.
@@ -1033,7 +1034,7 @@ tls_authenticate_key(struct tls_multi *multi, const unsigned int mda_key_id, con
         auth_set_client_reason(multi, client_reason);
         for (i = 0; i < KEY_SCAN_SIZE; ++i)
         {
-            struct key_state *ks = multi->key_scan[i];
+            struct key_state *ks = get_key_scan(multi, i);
             if (ks->mda_key_id == mda_key_id)
             {
                 ks->mda_status = auth ? ACF_SUCCEEDED : ACF_FAILED;
@@ -1043,7 +1044,7 @@ tls_authenticate_key(struct tls_multi *multi, const unsigned int mda_key_id, con
     }
     return ret;
 }
-#endif /* ifdef MANAGEMENT_DEF_AUTH */
+#endif /* ifdef ENABLE_MANAGEMENT */
 
 
 /* ****************************************************************************
@@ -1068,69 +1069,51 @@ verify_user_pass_script(struct tls_session *session, struct tls_multi *multi,
     const char *tmp_file = "";
     bool ret = false;
 
-    /* Is username defined? */
-    if ((session->opt->ssl_flags & SSLF_AUTH_USER_PASS_OPTIONAL) || strlen(up->username))
+    /* Set environmental variables prior to calling script */
+    setenv_str(session->opt->es, "script_type", "user-pass-verify");
+
+    /* format command line */
+    argv_parse_cmd(&argv, session->opt->auth_user_pass_verify_script);
+
+    if (session->opt->auth_user_pass_verify_script_via_file)
     {
-        /* Set environmental variables prior to calling script */
-        setenv_str(session->opt->es, "script_type", "user-pass-verify");
+        struct status_output *so;
 
-        if (session->opt->auth_user_pass_verify_script_via_file)
+        tmp_file = platform_create_temp_file(session->opt->tmp_dir, "up",
+                                             &gc);
+        if (tmp_file)
         {
-            struct status_output *so;
-
-            tmp_file = platform_create_temp_file(session->opt->tmp_dir, "up",
-                                                 &gc);
-            if (tmp_file)
+            so = status_open(tmp_file, 0, -1, NULL, STATUS_OUTPUT_WRITE);
+            status_printf(so, "%s", up->username);
+            status_printf(so, "%s", up->password);
+            if (!status_close(so))
             {
-                so = status_open(tmp_file, 0, -1, NULL, STATUS_OUTPUT_WRITE);
-                status_printf(so, "%s", up->username);
-                status_printf(so, "%s", up->password);
-                if (!status_close(so))
-                {
-                    msg(D_TLS_ERRORS, "TLS Auth Error: could not write username/password to file: %s",
-                        tmp_file);
-                    goto done;
-                }
+                msg(D_TLS_ERRORS, "TLS Auth Error: could not write username/password to file: %s",
+                    tmp_file);
+                goto done;
             }
-            else
-            {
-                msg(D_TLS_ERRORS, "TLS Auth Error: could not create write "
-                    "username/password to temp file");
-            }
+            /* pass temp file name to script */
+            argv_printf_cat(&argv, "%s", tmp_file);
         }
         else
         {
-            setenv_str(session->opt->es, "username", up->username);
-            setenv_str(session->opt->es, "password", up->password);
-        }
-
-        /* setenv incoming cert common name for script */
-        setenv_str(session->opt->es, "common_name", session->common_name);
-
-        /* setenv client real IP address */
-        setenv_untrusted(session);
-
-        /* add auth-token environment */
-        add_session_token_env(session, multi, up);
-
-        /* format command line */
-        argv_parse_cmd(&argv, session->opt->auth_user_pass_verify_script);
-        argv_printf_cat(&argv, "%s", tmp_file);
-
-        /* call command */
-        ret = openvpn_run_script(&argv, session->opt->es, 0,
-                                 "--auth-user-pass-verify");
-
-        if (!session->opt->auth_user_pass_verify_script_via_file)
-        {
-            setenv_del(session->opt->es, "password");
+            msg(D_TLS_ERRORS, "TLS Auth Error: could not create write "
+                "username/password to temp file");
         }
     }
     else
     {
-        msg(D_TLS_ERRORS, "TLS Auth Error: peer provided a blank username");
+        setenv_str(session->opt->es, "password", up->password);
     }
 
+    /* call command */
+    ret = openvpn_run_script(&argv, session->opt->es, 0,
+                             "--auth-user-pass-verify");
+
+    if (!session->opt->auth_user_pass_verify_script_via_file)
+    {
+        setenv_del(session->opt->es, "password");
+    }
 done:
     if (tmp_file && strlen(tmp_file) > 0)
     {
@@ -1150,60 +1133,37 @@ verify_user_pass_plugin(struct tls_session *session, struct tls_multi *multi,
                         const struct user_pass *up)
 {
     int retval = OPENVPN_PLUGIN_FUNC_ERROR;
-#ifdef PLUGIN_DEF_AUTH
     struct key_state *ks = &session->key[KS_PRIMARY];      /* primary key */
-#endif
 
-    /* Is username defined? */
-    if ((session->opt->ssl_flags & SSLF_AUTH_USER_PASS_OPTIONAL) || strlen(up->username))
+    /* set password in private env space */
+    setenv_str(session->opt->es, "password", up->password);
+
+    /* generate filename for deferred auth control file */
+    if (!key_state_gen_auth_control_file(ks, session->opt))
     {
-        /* set username/password in private env space */
-        setenv_str(session->opt->es, "username", up->username);
-        setenv_str(session->opt->es, "password", up->password);
-
-        /* setenv incoming cert common name for script */
-        setenv_str(session->opt->es, "common_name", session->common_name);
-
-        /* setenv client real IP address */
-        setenv_untrusted(session);
-
-        /* add auth-token environment */
-        add_session_token_env(session, multi, up);
-#ifdef PLUGIN_DEF_AUTH
-        /* generate filename for deferred auth control file */
-        if (!key_state_gen_auth_control_file(ks, session->opt))
-        {
-            msg(D_TLS_ERRORS, "TLS Auth Error (%s): "
-                "could not create deferred auth control file", __func__);
-            return retval;
-        }
-#endif
-
-        /* call command */
-        retval = plugin_call(session->opt->plugins, OPENVPN_PLUGIN_AUTH_USER_PASS_VERIFY, NULL, NULL, session->opt->es);
-
-#ifdef PLUGIN_DEF_AUTH
-        /* purge auth control filename (and file itself) for non-deferred returns */
-        if (retval != OPENVPN_PLUGIN_FUNC_DEFERRED)
-        {
-            key_state_rm_auth_control_file(ks);
-        }
-#endif
-
-        setenv_del(session->opt->es, "password");
+        msg(D_TLS_ERRORS, "TLS Auth Error (%s): "
+            "could not create deferred auth control file", __func__);
+        return retval;
     }
-    else
+
+    /* call command */
+    retval = plugin_call(session->opt->plugins, OPENVPN_PLUGIN_AUTH_USER_PASS_VERIFY, NULL, NULL, session->opt->es);
+
+    /* purge auth control filename (and file itself) for non-deferred returns */
+    if (retval != OPENVPN_PLUGIN_FUNC_DEFERRED)
     {
-        msg(D_TLS_ERRORS, "TLS Auth Error (verify_user_pass_plugin): peer provided a blank username");
+        key_state_rm_auth_control_file(ks);
     }
+
+    setenv_del(session->opt->es, "password");
 
     return retval;
 }
 
 
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
 /*
- * MANAGEMENT_DEF_AUTH internal ssl_verify.c status codes
+ * management deferred internal ssl_verify.c status codes
  */
 #define KMDA_ERROR   0
 #define KMDA_SUCCESS 1
@@ -1218,12 +1178,30 @@ verify_user_pass_management(struct tls_session *session,
     int retval = KMDA_ERROR;
     struct key_state *ks = &session->key[KS_PRIMARY];      /* primary key */
 
+    /* set username/password in private env space */
+    setenv_str(session->opt->es, "password", up->password);
+
+    if (management)
+    {
+        management_notify_client_needing_auth(management, ks->mda_key_id, session->opt->mda_context, session->opt->es);
+    }
+
+    setenv_del(session->opt->es, "password");
+
+    retval = KMDA_SUCCESS;
+
+    return retval;
+}
+#endif /* ifdef ENABLE_MANAGEMENT */
+
+static bool
+set_verify_user_pass_env(struct user_pass *up, struct tls_multi *multi,
+                         struct tls_session *session)
+{
     /* Is username defined? */
     if ((session->opt->ssl_flags & SSLF_AUTH_USER_PASS_OPTIONAL) || strlen(up->username))
     {
-        /* set username/password in private env space */
         setenv_str(session->opt->es, "username", up->username);
-        setenv_str(session->opt->es, "password", up->password);
 
         /* setenv incoming cert common name for script */
         setenv_str(session->opt->es, "common_name", session->common_name);
@@ -1236,24 +1214,14 @@ verify_user_pass_management(struct tls_session *session,
          * allow the management to figure out if it is a new session or a continued one
          */
         add_session_token_env(session, multi, up);
-        if (management)
-        {
-            management_notify_client_needing_auth(management, ks->mda_key_id, session->opt->mda_context, session->opt->es);
-        }
-
-        setenv_del(session->opt->es, "password");
-
-        retval = KMDA_SUCCESS;
+        return true;
     }
     else
     {
-        msg(D_TLS_ERRORS, "TLS Auth Error (verify_user_pass_management): peer provided a blank username");
+        msg(D_TLS_ERRORS, "TLS Auth Error: peer provided a blank username");
+        return false;
     }
-
-    return retval;
 }
-#endif /* ifdef MANAGEMENT_DEF_AUTH */
-
 
 /*
  * Main username/password verification entry point
@@ -1269,7 +1237,7 @@ verify_user_pass(struct user_pass *up, struct tls_multi *multi,
     bool s2 = true;
     struct key_state *ks = &session->key[KS_PRIMARY];      /* primary key */
 
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
     int man_def_auth = KMDA_UNDEF;
 
     if (management_enable_def_auth(management))
@@ -1325,10 +1293,18 @@ verify_user_pass(struct user_pass *up, struct tls_multi *multi,
             return;
         }
     }
+
+    /* Set the environment variables used by all auth variants */
+    if (!set_verify_user_pass_env(up, multi, session))
+    {
+        skip_auth = true;
+        s1 = OPENVPN_PLUGIN_FUNC_ERROR;
+    }
+
     /* call plugin(s) and/or script */
     if (!skip_auth)
     {
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
         if (man_def_auth==KMDA_DEF)
         {
             man_def_auth = verify_user_pass_management(session, multi, up);
@@ -1356,23 +1332,19 @@ verify_user_pass(struct user_pass *up, struct tls_multi *multi,
     }
     /* auth succeeded? */
     if ((s1 == OPENVPN_PLUGIN_FUNC_SUCCESS
-#ifdef PLUGIN_DEF_AUTH
          || s1 == OPENVPN_PLUGIN_FUNC_DEFERRED
-#endif
          ) && s2
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
         && man_def_auth != KMDA_ERROR
 #endif
         && tls_lock_username(multi, up->username))
     {
         ks->authenticated = KS_AUTH_TRUE;
-#ifdef PLUGIN_DEF_AUTH
         if (s1 == OPENVPN_PLUGIN_FUNC_DEFERRED)
         {
             ks->authenticated = KS_AUTH_DEFERRED;
         }
-#endif
-#ifdef MANAGEMENT_DEF_AUTH
+#ifdef ENABLE_MANAGEMENT
         if (man_def_auth != KMDA_UNDEF)
         {
             ks->authenticated = KS_AUTH_DEFERRED;
