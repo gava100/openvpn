@@ -204,7 +204,8 @@ fast hardware. SSL/TLS authentication must be used in this mode.
      ifconfig-ipv6-pool ipv6addr/bits
 
   The pool starts at ``ipv6addr`` and matches the offset determined from
-  the start of the IPv4 pool.
+  the start of the IPv4 pool.  If the host part of the given IPv6
+  address is ``0``, the pool starts at ``ipv6addr`` +1.
 
 --ifconfig-pool-persist args
   Persist/unpersist ifconfig-pool data to ``file``, at ``seconds``
@@ -667,9 +668,15 @@ fast hardware. SSL/TLS authentication must be used in this mode.
   ``--max-routes-per-client``
 
 --username-as-common-name
-  For ``--auth-user-pass-verify`` authentication, use the authenticated
-  username as the common name, rather than the common name from the client
-  cert.
+  Use the authenticated username as the common-name, rather than the
+  common-name from the client certificate. Requires that some form of
+  ``--auth-user-pass`` verification is in effect. As the replacement happens
+  after ``--auth-user-pass`` verification, the verification script or
+  plugin will still receive the common-name from the certificate.
+
+  The common_name environment variable passed to scripts and plugins invoked
+  after authentication (e.g, client-connect script) and file names parsed in
+  client-config directory will match the username.
 
 --verify-client-cert mode
   Specify whether the client is required to supply a valid certificate.

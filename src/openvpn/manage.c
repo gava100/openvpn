@@ -3310,12 +3310,17 @@ man_block(struct management *man, volatile int *signal_received, const time_t ex
 
     if (man_standalone_ok(man))
     {
+        /* expire time can be already overdue, for this case init zero
+         * timeout to avoid waiting first time and exit loop early with
+         * either obtained event or timeout.
+         */
+        tv.tv_usec = 0;
+        tv.tv_sec = 0;
+
         while (true)
         {
             event_reset(man->connection.es);
             management_socket_set(man, man->connection.es, NULL, NULL);
-            tv.tv_usec = 0;
-            tv.tv_sec = 1;
             if (man_check_for_signals(signal_received))
             {
                 status = -1;
@@ -3343,6 +3348,10 @@ man_block(struct management *man, volatile int *signal_received, const time_t ex
                 }
                 break;
             }
+
+            /* wait one second more */
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
         }
     }
     return status;
@@ -3444,7 +3453,7 @@ management_event_loop_n_seconds(struct management *man, int sec)
 
         /* set expire time */
         update_time();
-        if (sec)
+        if (sec >= 0)
         {
             expire = now + sec;
         }
@@ -3474,7 +3483,7 @@ management_event_loop_n_seconds(struct management *man, int sec)
         /* revert state */
         man->persist.standalone_disabled = standalone_disabled_save;
     }
-    else
+    else if (sec > 0)
     {
         sleep(sec);
     }
@@ -3604,7 +3613,6 @@ management_query_user_pass(struct management *man,
         {
             /* preserve caller's settings */
             man->connection.up_query.nocache = up->nocache;
-            man->connection.up_query.wait_for_push = up->wait_for_push;
             *up = man->connection.up_query;
         }
         secure_memzero(&man->connection.up_query, sizeof(man->connection.up_query));
@@ -4117,11 +4125,15 @@ log_history_ref(const struct log_history *h, const int index)
 void
 management_sleep(const int n)
 {
-    if (management)
+    if (n < 0)
+    {
+        return;
+    }
+    else if (management)
     {
         management_event_loop_n_seconds(management, n);
     }
-    else
+    else if (n > 0)
     {
         sleep(n);
     }
@@ -4132,7 +4144,10 @@ management_sleep(const int n)
 void
 management_sleep(const int n)
 {
-    sleep(n);
+    if (n > 0)
+    {
+        sleep(n);
+    }
 }
 
 #endif /* ENABLE_MANAGEMENT */
