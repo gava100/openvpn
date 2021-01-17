@@ -458,6 +458,17 @@ next_connection_entry(struct context *c)
                  */
                 if (!c->options.persist_remote_ip)
                 {
+                    /* Connection entry addrinfo objects might have been
+                     * resolved earlier but the entry itself might have been
+                     * skipped by management on the previous loop.
+                     * If so, clear the addrinfo objects as close_instance does
+                     */
+                    if (c->c1.link_socket_addr.remote_list)
+                    {
+                        clear_remote_addrlist(&c->c1.link_socket_addr,
+                                              !c->options.resolve_in_advance);
+                    }
+
                     /* close_instance should have cleared the addrinfo objects */
                     ASSERT(c->c1.link_socket_addr.current_remote == NULL);
                     ASSERT(c->c1.link_socket_addr.remote_list == NULL);
@@ -1527,7 +1538,7 @@ initialization_sequence_completed(struct context *c, const unsigned int flags)
      */
     if (c->options.mode == MODE_POINT_TO_POINT)
     {
-        delayed_auth_pass_purge();
+        ssl_clean_user_pass();
     }
 #endif /* ENABLE_CRYPTO */
 
@@ -2736,6 +2747,7 @@ do_init_crypto_tls(struct context *c, const unsigned int flags)
     to.tcp_mode = link_socket_proto_connection_oriented(options->ce.proto);
     to.config_ciphername = c->c1.ciphername;
     to.config_authname = c->c1.authname;
+    to.config_ncp_ciphers = options->ncp_ciphers;
     to.ncp_enabled = options->ncp_enabled;
     to.transition_window = options->transition_window;
     to.handshake_window = options->handshake_window;
