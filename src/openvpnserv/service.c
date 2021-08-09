@@ -229,10 +229,11 @@ _tmain(int argc, TCHAR *argv[])
      */
     const SERVICE_TABLE_ENTRY dispatchTable_shared[] = {
         { automatic_service.name, ServiceStartAutomatic },
-        { interactive_service.name, ServiceStartInteractive },
+        //{ interactive_service.name, ServiceStartInteractive },
         { NULL, NULL }
     };
 
+#if 0 // Gava
     /* Automatic service only (as a SERVICE_WIN32_OWN_PROCESS) */
     const SERVICE_TABLE_ENTRY dispatchTable_automatic[] = {
         { TEXT(""), ServiceStartAutomaticOwn },
@@ -244,11 +245,12 @@ _tmain(int argc, TCHAR *argv[])
         { TEXT(""), ServiceStartInteractiveOwn },
         { NULL, NULL }
     };
+#endif
 
     const SERVICE_TABLE_ENTRY *dispatchTable = dispatchTable_shared;
 
     openvpn_service[0] = automatic_service;
-    openvpn_service[1] = interactive_service;
+    //openvpn_service[1] = interactive_service;
 
     for (int i = 1; i < argc; i++)
     {
@@ -264,9 +266,11 @@ _tmain(int argc, TCHAR *argv[])
             }
             else if (_tcsicmp(TEXT("start"), argv[i] + 1) == 0)
             {
-                BOOL is_auto = argc < i + 2 || _tcsicmp(TEXT("interactive"), argv[i + 1]) != 0;
-                return CmdStartService(is_auto ? automatic : interactive);
+                //BOOL is_auto = argc < i + 2 || _tcsicmp(TEXT("interactive"), argv[i + 1]) != 0;
+                //return CmdStartService(is_auto ? automatic : interactive);
+                return CmdStartService(automatic);
             }
+#if 0            
             else if (argc > i + 2 && _tcsicmp(TEXT("instance"), argv[i] + 1) == 0)
             {
                 dispatchTable = _tcsicmp(TEXT("interactive"), argv[i + 1]) != 0 ?
@@ -276,18 +280,21 @@ _tmain(int argc, TCHAR *argv[])
                 service_instance = argv[i + 2];
                 i += 2;
             }
+#endif            
             else
             {
-                _tprintf(TEXT("%s -install        to install the services\n"), APPNAME);
-                _tprintf(TEXT("%s -start <name>   to start a service (\"automatic\" or \"interactive\")\n"), APPNAME);
-                _tprintf(TEXT("%s -remove         to remove the services\n"), APPNAME);
+                _tprintf(TEXT("%s -install        to install the service\n"), APPNAME);
+                _tprintf(TEXT("%s -start          to start the service\n"), APPNAME);
+                _tprintf(TEXT("%s -remove         to remove the service\n"), APPNAME);
 
+#if 0
                 _tprintf(TEXT("\nService run-time parameters:\n"));
                 _tprintf(TEXT("-instance <name> <id>\n")
                          TEXT("   Runs the service as an alternate instance. <name> can be \"automatic\" or\n")
                          TEXT("   \"interactive\". The service settings will be loaded from\n")
                          TEXT("   HKLM\\Software\\" PACKAGE_NAME "<id> registry key, and the interactive service will accept\n")
                          TEXT("   requests on \\\\.\\pipe\\" PACKAGE "<id>\\service named pipe.\n"));
+#endif                
 
                 return 0;
             }

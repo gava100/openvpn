@@ -48,8 +48,8 @@ static SERVICE_STATUS status = { .dwServiceType = SERVICE_WIN32_SHARE_PROCESS };
 
 openvpn_service_t automatic_service = {
     automatic,
-    TEXT(PACKAGE_NAME "ServiceLegacy"),
-    TEXT(PACKAGE_NAME " Legacy Service"),
+    TEXT(PACKAGE_NAME "Service"),
+    TEXT(PACKAGE_NAME " Service"),
     TEXT(SERVICE_DEPENDENCIES),
     SERVICE_DEMAND_START
 };

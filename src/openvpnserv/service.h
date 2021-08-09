@@ -48,7 +48,7 @@
 
 typedef enum {
     automatic,
-    interactive,
+//    interactive,
     _service_max
 } openvpn_service_type;
 
@@ -72,7 +72,7 @@ typedef struct {
 } settings_t;
 
 extern openvpn_service_t automatic_service;
-extern openvpn_service_t interactive_service;
+//extern openvpn_service_t interactive_service;
 extern LPCTSTR service_instance;
 
 VOID WINAPI ServiceStartAutomaticOwn(DWORD argc, LPTSTR *argv);

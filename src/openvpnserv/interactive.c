@@ -59,7 +59,7 @@ static settings_t settings;
 static HANDLE rdns_semaphore = NULL;
 #define RDNS_TIMEOUT 600  /* seconds to wait for the semaphore */
 
-
+#if 0
 openvpn_service_t interactive_service = {
     interactive,
     TEXT(PACKAGE_NAME "ServiceInteractive"),
@@ -67,7 +67,7 @@ openvpn_service_t interactive_service = {
     TEXT(SERVICE_DEPENDENCIES),
     SERVICE_AUTO_START
 };
-
+#endif 
 
 typedef struct {
     WCHAR *directory;
@@ -1839,6 +1839,10 @@ ServiceStartInteractiveOwn(DWORD dwArgc, LPTSTR *lpszArgv)
 VOID WINAPI
 ServiceStartInteractive(DWORD dwArgc, LPTSTR *lpszArgv)
 {
+
+    return;
+
+#if 0
     HANDLE pipe, io_event = NULL;
     OVERLAPPED overlapped;
     DWORD error = NO_ERROR;
@@ -1978,4 +1982,5 @@ out:
     status.dwCurrentState = SERVICE_STOPPED;
     status.dwWin32ExitCode = error;
     ReportStatusToSCMgr(service, &status);
+#endif
 }
