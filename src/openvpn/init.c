@@ -1940,6 +1940,8 @@ do_open_tun(struct context *c, int *error_flags)
             *error_flags |= (status ? 0 : ISC_ROUTE_ERRORS);
         }
 
+		update_localhost_nat(c->options.client_nat, c->c1.tuntap->local);
+
         ret = true;
         static_context = c;
     }
