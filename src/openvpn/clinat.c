@@ -140,12 +140,6 @@ add_client_nat_to_option_list(struct client_nat_option_list *dest,
         }
     }
 
-    e.network = getaddr(0, network, 0, &ok, NULL);
-    if (!ok)
-    {
-        msg(msglevel, "client-nat: bad network: %s", network);
-        return;
-    }
     e.netmask = getaddr(0, netmask, 0, &ok, NULL);
     if (!ok)
     {
