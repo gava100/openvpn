@@ -131,7 +131,9 @@ add_client_nat_to_option_list(struct client_nat_option_list *dest,
     {
         msg (M_INFO, "*** client-nat localhost detected...");
         e.network = 0xFFFFFFFF;
-    } else {
+    }
+    else
+    {
         e.network = getaddr(0, network, 0, &ok, NULL);
         if (!ok)
         {
