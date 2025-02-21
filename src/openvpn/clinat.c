@@ -129,7 +129,7 @@ add_client_nat_to_option_list(struct client_nat_option_list *dest,
 
     if (network && !strcmp(network, "localhost"))
     {
-        msg (M_INFO, "*** client-nat localhost detected...");
+        msg(M_INFO, "*** client-nat localhost detected...");
         e.network = 0xFFFFFFFF;
     }
     else
@@ -285,30 +285,31 @@ client_nat_transform(const struct client_nat_option_list *list,
 }
 
 /*
-* Replaces the localhost token with the IP received from OpenVPN
-*/
-bool 
+ * Replaces the localhost token with the IP received from OpenVPN
+ */
+bool
 update_localhost_nat(struct client_nat_option_list *dest, in_addr_t local_ip)
 {
     int i;
     bool ret = false;
 
-    if (!dest) {
+    if (!dest)
+    {
         return ret;
     }
 
-    for (i=0; i <= dest->n; i++) 
+    for (i = 0; i <= dest->n; i++)
     {
         struct client_nat_entry *nat_entry = &dest->entries[i];
-        if (nat_entry && nat_entry->network == 0xFFFFFFFF) 
+        if (nat_entry && nat_entry->network == 0xFFFFFFFF)
         {
             struct in_addr addr;
-          
+
             nat_entry->network = ntohl(local_ip);
             addr.s_addr = nat_entry->network;
             char *dot_ip = inet_ntoa(addr);
 
-            msg (M_INFO, "CNAT - Updating NAT table from localhost to: %s", dot_ip); 
+            msg(M_INFO, "CNAT - Updating NAT table from localhost to: %s", dot_ip);
             ret = true;
         }
     }
