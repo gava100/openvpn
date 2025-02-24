@@ -135,16 +135,20 @@ configuration.
   Examples:
   ::
 
-      client-nat snat 192.168.0.0/255.255.0.0
-      client-nat dnat 10.64.0.0/255.255.0.0
-
-  ``network/netmask`` (for example :code:`192.168.0.0/255.255.0.0`) defines
-  the local view of a resource from the client perspective, while
-  ``alias/netmask`` (for example :code:`10.64.0.0/255.255.0.0`) defines the
-  remote view from the server perspective.
+      client-nat snat assigned-ip 255.255.255.255 172.17.80.17
+      client-nat snat 192.168.100.102 255.255.255.255 172.17.80.18
+      client-nat dnat 10.64.0.0 255.255.0.0 192.168.0.0
 
   Use :code:`snat` (source NAT) for resources owned by the client and
   :code:`dnat` (destination NAT) for remote resources.
+
+  ``network`` defines the local view of a resource from the client perspective. 
+  Use :code:`assigned-ip` to instruct openvpn to use the assigned ip address 
+  received from the server.
+  
+  ``netmask`` specifies the local mask.
+
+  ``alias`` defines the remote view from the server perspective.
 
   Set ``--verb 6`` for debugging info showing the transformation of
   src/dest addresses in packets.
