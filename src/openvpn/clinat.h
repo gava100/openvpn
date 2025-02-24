@@ -64,4 +64,6 @@ void client_nat_transform(const struct client_nat_option_list *list,
                           struct buffer *ipbuf,
                           const int direction);
 
+bool update_assignedip_nat(struct client_nat_option_list *dest, in_addr_t local_ip);
+
 #endif /* if !defined(CLINAT_H) */
